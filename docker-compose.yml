@@ -1,0 +1,77 @@
+# Target topology for Aegis-OptionAI. Redis is real and will come up today;
+# the 4 service blocks below point at Dockerfiles that don't exist yet
+# (services/*/ are still empty) so `docker compose up` won't
+# fully work until each one lands. Wiring it now means whoever writes the
+# first service just drops in a Dockerfile + main.py and this file already
+# knows where it lives.
+
+networks:
+  trader-network:
+    driver: bridge
+
+volumes:
+  redis-data:
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: aegis-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - trader-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  broker-gateway:
+    build:
+      context: .
+      dockerfile: services/broker-gateway/Dockerfile
+    container_name: broker-gateway
+    ports:
+      - "8001:8001"
+    env_file:
+      - .env
+    networks:
+      - trader-network
+
+  ai-strategy:
+    build:
+      context: .
+      dockerfile: services/ai-strategy/Dockerfile
+    container_name: ai-strategy
+    ports:
+      - "8002:8002"
+    env_file:
+      - .env
+    networks:
+      - trader-network
+
+  chaos-sandbox:
+    build:
+      context: .
+      dockerfile: services/chaos-sandbox/Dockerfile
+    container_name: chaos-sandbox
+    ports:
+      - "8003:8003"
+    env_file:
+      - .env
+    networks:
+      - trader-network
+
+  risk-engine:
+    build:
+      context: .
+      dockerfile: services/risk-engine/Dockerfile
+    container_name: risk-engine
+    ports:
+      - "8004:8004"
+    env_file:
+      - .env
+    networks:
+      - trader-network
