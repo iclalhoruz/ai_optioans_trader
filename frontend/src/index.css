@@ -1,0 +1,160 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  @apply bg-background text-on-surface antialiased cyber-grid;
+}
+
+/* Effects below are presentation-only glows/blurs, not design tokens - they
+   use literal values (like the mockups did) rather than theme colors because
+   they're meant to read as "glass over whatever's underneath", not a solid
+   surface color. Shared across every screen so the app reads as one system,
+   not a per-page style. */
+@layer components {
+  .glass-panel {
+    background-color: rgba(17, 19, 24, 0.65);
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+    border: 1px solid rgba(0, 209, 255, 0.25);
+    box-shadow:
+      0 8px 32px 0 rgba(0, 0, 0, 0.37),
+      inset 0 0 20px rgba(0, 209, 255, 0.05);
+    transition: all 0.3s ease;
+  }
+  .glass-panel:hover {
+    border-color: rgba(0, 209, 255, 0.4);
+    box-shadow:
+      0 8px 32px 0 rgba(0, 0, 0, 0.37),
+      0 0 15px rgba(0, 209, 255, 0.15),
+      inset 0 0 20px rgba(0, 209, 255, 0.1);
+  }
+
+  .cyber-grid {
+    background-image:
+      linear-gradient(to right, rgba(0, 209, 255, 0.03) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(0, 209, 255, 0.03) 1px, transparent 1px);
+    background-size: 40px 40px;
+  }
+
+  /* text-shadow glow for soft/display accent color (text-primary) */
+  .neon-glow {
+    text-shadow: 0 0 12px rgba(0, 209, 255, 0.5);
+  }
+
+  /* drop-shadow glow for vivid/interactive accent color (text-primary-container) */
+  .neon-text-cyan {
+    filter: drop-shadow(0 0 6px rgba(0, 209, 255, 0.6));
+  }
+  .neon-text-green {
+    filter: drop-shadow(0 0 6px rgba(57, 251, 136, 0.6));
+  }
+  .neon-text-amber {
+    filter: drop-shadow(0 0 6px rgba(255, 180, 171, 0.6));
+  }
+
+  /* radiating ring - "this dot represents something live" */
+  .pulse-dot {
+    animation: pulse-ring 2s infinite;
+  }
+
+  /* glow-intensity pulse - "this element is actively working" */
+  .neon-pulse {
+    animation: pulse-glow 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+
+  .ai-processing {
+    background: linear-gradient(90deg, transparent, rgba(0, 209, 255, 0.15), transparent);
+    background-size: 200% 100%;
+    animation: processing-scan 2s linear infinite;
+  }
+
+  /* Vertical timeline connector (run detail page) - color represents the
+     outcome of the step it leads INTO, not the step it starts from. */
+  .step-line {
+    position: absolute;
+    left: 16px;
+    top: 32px;
+    bottom: -8px;
+    width: 2px;
+    background: #3c494e;
+    z-index: 0;
+    box-shadow: 0 0 8px rgba(0, 0, 0, 0.5);
+  }
+  .step-line-active {
+    background: #39fb88;
+    box-shadow: 0 0 8px rgba(57, 251, 136, 0.4);
+  }
+  .step-line-error {
+    background: #ffb4ab;
+    box-shadow: 0 0 8px rgba(255, 180, 171, 0.4);
+  }
+
+  .cyber-chip {
+    background: rgba(26, 28, 32, 0.6);
+    border: 1px solid #3c494e;
+    backdrop-filter: blur(4px);
+  }
+
+  .red-alert {
+    color: #ffb4ab;
+    border-color: #93000a;
+    background: rgba(147, 0, 10, 0.15);
+    box-shadow:
+      0 0 20px rgba(255, 180, 171, 0.1),
+      inset 0 0 20px rgba(147, 0, 10, 0.2);
+  }
+
+  .hazard-pulse {
+    animation: hazard-pulse 3s infinite;
+  }
+}
+
+@keyframes pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 rgba(0, 209, 255, 0.4);
+  }
+  70% {
+    box-shadow: 0 0 0 6px rgba(0, 209, 255, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(0, 209, 255, 0);
+  }
+}
+
+@keyframes pulse-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 4px rgba(0, 209, 255, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 16px rgba(0, 209, 255, 0.8);
+  }
+}
+
+@keyframes processing-scan {
+  0% {
+    background-position: -100% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+@keyframes hazard-pulse {
+  0% {
+    box-shadow:
+      0 0 0 0 rgba(255, 180, 171, 0.2),
+      inset 0 0 20px rgba(147, 0, 10, 0.2);
+  }
+  70% {
+    box-shadow:
+      0 0 20px 10px rgba(255, 180, 171, 0),
+      inset 0 0 40px rgba(147, 0, 10, 0.4);
+  }
+  100% {
+    box-shadow:
+      0 0 0 0 rgba(255, 180, 171, 0),
+      inset 0 0 20px rgba(147, 0, 10, 0.2);
+  }
+}

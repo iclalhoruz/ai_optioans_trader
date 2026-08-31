@@ -18,11 +18,14 @@ Market Data → AI Strategy → Chaos Sandbox → Hard-Veto Risk → Execution
 
 ## Status
 
-**Shell built, services not written yet.** `contracts/` and `workflow/pipeline.py`
-are done and verified against a mocked service transport. The 4 service folders
-under `services/` are intentionally empty — the team hasn't picked each service's
-internal architecture yet, and everyone works on their own service folder in
-parallel once that's decided. See `CLAUDE.md` for the full state of things and the
+**Shell built, services not written yet, frontend has its first screen.**
+`contracts/` and `workflow/pipeline.py` are done and verified against a mocked
+service transport. The 4 service folders under `services/` are intentionally
+empty — the team hasn't picked each service's internal architecture yet, and
+everyone works on their own service folder in parallel once that's decided.
+`frontend/` has a Portfolio dashboard screen built against mock data, matching
+an approved design and ready for real screens/data to be added on top of the
+same component system. See `CLAUDE.md` for the full state of things and the
 decisions already locked in.
 
 ## Layout
@@ -35,6 +38,7 @@ decisions already locked in.
 | `services/chaos-sandbox/` | 8003 | Runs generated code under injected market stress. *(pending)* |
 | `services/risk-engine/` | 8004 | Deterministic hard-veto risk gate. *(pending)* |
 | `workflow/pipeline.py` | — | Cross-service async orchestrator, chains the 4 services end to end. |
+| `frontend/` | 5173 | Dashboard UI (Vite + React + TS + Tailwind). Portfolio screen done, see `frontend/README.md`. |
 
 ## Why it's split this way
 
@@ -66,3 +70,11 @@ python test_pipeline.py       # runs the real orchestrator against mocked
 Once a service exists (own `requirements.txt` + `Dockerfile` + `main.py`), add it
 to `docker-compose.yml`'s build step and `python -m workflow.pipeline <TICKER>`
 will start hitting it for real instead of the mocks.
+
+For the frontend:
+
+```bash
+cd frontend
+npm install
+npm run dev    # http://localhost:5173
+```
