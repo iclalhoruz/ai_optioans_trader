@@ -205,8 +205,17 @@ STEPS: tuple[StepConfig, ...] = (
 
 
 def _notional_value(proposal: TradeProposal) -> float:
+    # An option contract represents 100 underlying shares, not 1 - a $95
+    # per-contract premium is $9,500 of real exposure, not $95. Verified
+    # against a real proposal (chaos-sandbox's own entry_total calc agrees):
+    # dropping the multiplier here would silently make HITL's notional
+    # threshold check 100x too lenient the moment HITL_ENABLED is turned on.
     details = proposal.order_details
-    return float(details.get("quantity", 0)) * float(details.get("limit_price", 0))
+    return (
+        float(details.get("quantity", 0))
+        * float(details.get("limit_price", 0))
+        * float(details.get("contract_multiplier", 100))
+    )
 
 
 def requires_human_approval(state: PipelineState, settings: PipelineSettings) -> bool:

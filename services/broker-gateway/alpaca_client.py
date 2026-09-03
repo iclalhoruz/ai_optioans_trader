@@ -21,15 +21,28 @@ import asyncio
 import json
 import os
 import subprocess
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from contracts.interfaces import BaseBrokerGateway
 from contracts.schemas import ExecutionResponse, MarketContext, TradeProposal
 
-# How far around the spot price to pull strikes for chain_summary - a full
-# chain can be hundreds of contracts, ai-strategy only needs the ones near
-# the money to reason about.
+# How far around the spot price to pull strikes for the near-the-money
+# slice of chain_summary - used for MarketContext.implied_volatility and
+# as general market context.
 STRIKE_WINDOW = 10.0
+
+# A single long option is extremely leveraged - checked live with the real
+# Black-Scholes math in chaos_sandbox/pricing.py: even a deep (40%) ITM,
+# 30-day call still loses ~25% of its value on a 10% adverse move, and an
+# ATM call loses 60-100% regardless of expiry. chaos-sandbox's ADVERSE_MOVE
+# scenario (10% shock, 35% max-loss veto) means ai-strategy needs contracts
+# deep enough ITM and far enough dated to actually survive that test, not
+# just near-the-money ones - so a second, targeted band is fetched
+# specifically for that: 60%-140% of spot (covers ITM calls below spot and
+# ITM puts above spot) at least ITM_MIN_DAYS_TO_EXPIRY out.
+ITM_STRIKE_LOW_PCT = 0.60
+ITM_STRIKE_HIGH_PCT = 1.40
+ITM_MIN_DAYS_TO_EXPIRY = 180
 
 # `alpaca data option chain` paginates past 100 results by default, and its
 # own server-side max is 1000. A fixed --limit isn't safe on its own - SPY
@@ -38,6 +51,20 @@ STRIKE_WINDOW = 10.0
 # _fetch_option_chain below always follows next_page_token instead of
 # trusting one call to have everything.
 CHAIN_PAGE_LIMIT = 1000
+
+
+def _parse_occ_symbol(symbol: str) -> dict:
+    """OCC option symbol -> {option_type, strike, expiration_date,
+    days_to_expiry}. Format is root+YYMMDD+C|P+strike*1000 (8 digits) -
+    parsed from the right since the root symbol's own length varies
+    (AAPL vs SPY), so a fixed offset from the left would break."""
+    expiration = date(2000 + int(symbol[-15:-13]), int(symbol[-13:-11]), int(symbol[-11:-9]))
+    return {
+        "option_type": "call" if symbol[-9] == "C" else "put",
+        "strike": int(symbol[-8:]) / 1000,
+        "expiration_date": expiration.isoformat(),
+        "days_to_expiry": max(0, (expiration - date.today()).days),
+    }
 
 
 class AlpacaCLIError(Exception):
@@ -80,7 +107,9 @@ class AlpacaBrokerGateway(BaseBrokerGateway):
                 raise AlpacaCLIError(500, result.stderr.strip() or "alpaca CLI failed with no output")
         return json.loads(result.stdout)
 
-    async def _fetch_option_chain(self, ticker: str, low: float, high: float) -> dict:
+    async def _fetch_option_chain(
+        self, ticker: str, low: float, high: float, expiration_date_gte: str | None = None
+    ) -> dict:
         """Follows next_page_token until it's empty - a single call can't be
         trusted to have the whole chain (see CHAIN_PAGE_LIMIT's comment)."""
         snapshots: dict = {}
@@ -93,6 +122,8 @@ class AlpacaBrokerGateway(BaseBrokerGateway):
                 "--strike-price-lte", str(high),
                 "--limit", str(CHAIN_PAGE_LIMIT),
             ]
+            if expiration_date_gte:
+                args += ["--expiration-date-gte", expiration_date_gte]
             if page_token:
                 args += ["--page-token", page_token]
             page = await self._cli(*args)
@@ -105,14 +136,23 @@ class AlpacaBrokerGateway(BaseBrokerGateway):
         trade = await self._cli("data", "latest-trade", "--symbol", ticker)
         spot_price = float(trade["trade"]["p"])
 
-        snapshots = await self._fetch_option_chain(ticker, spot_price - STRIKE_WINDOW, spot_price + STRIKE_WINDOW)
+        near_the_money = await self._fetch_option_chain(
+            ticker, spot_price - STRIKE_WINDOW, spot_price + STRIKE_WINDOW
+        )
+        deep_itm_long_dated = await self._fetch_option_chain(
+            ticker,
+            spot_price * ITM_STRIKE_LOW_PCT,
+            spot_price * ITM_STRIKE_HIGH_PCT,
+            expiration_date_gte=(date.today() + timedelta(days=ITM_MIN_DAYS_TO_EXPIRY)).isoformat(),
+        )
+        # Same dict merge, not two separate lists - overlap between the two
+        # windows (a long-dated contract already near the money) just
+        # updates with identical data, harmless.
+        snapshots = {**near_the_money, **deep_itm_long_dated}
 
         contracts = []
-        ivs = []
         for symbol, snapshot in snapshots.items():
             iv = snapshot.get("impliedVolatility")
-            if iv is not None:
-                ivs.append(iv)
             quote = snapshot.get("latestQuote") or {}
             contracts.append(
                 {
@@ -121,12 +161,20 @@ class AlpacaBrokerGateway(BaseBrokerGateway):
                     "ask": quote.get("ap"),
                     "implied_volatility": iv,
                     "greeks": snapshot.get("greeks"),
+                    # Parsed here (not left for ai-strategy to figure out
+                    # from the raw OCC symbol) since every consumer of
+                    # chain_summary needs these as plain fields -
+                    # chaos-sandbox's OptionStressInputs requires
+                    # option_type/strike/days_to_expiry by exact name.
+                    **_parse_occ_symbol(symbol),
                 }
             )
 
-        # Representative IV for the top-level field - average across the
-        # near-the-money window rather than picking one arbitrary contract.
-        implied_volatility = sum(ivs) / len(ivs) if ivs else 0.0
+        # Representative IV for the top-level field - near-the-money only
+        # (not the merged deep-ITM contracts, which skew lower/differently)
+        # rather than picking one arbitrary contract.
+        near_money_ivs = [s["impliedVolatility"] for s in near_the_money.values() if s.get("impliedVolatility") is not None]
+        implied_volatility = sum(near_money_ivs) / len(near_money_ivs) if near_money_ivs else 0.0
 
         return MarketContext(
             ticker=ticker,

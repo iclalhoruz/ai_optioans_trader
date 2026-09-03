@@ -95,6 +95,26 @@ fed `ai-strategy` an incomplete chain for two of five watchlist tickers,
 forever, with no error anywhere). `_fetch_option_chain` now always follows
 `next_page_token` until it's empty instead of trusting one page.
 
+## Two chain windows, not one
+
+`get_market_context` fetches **two separate strike windows**, merged into
+one `chain_summary.contracts` list:
+
+1. **Near-the-money** (±`STRIKE_WINDOW`, $10): general market snapshot,
+   also what `MarketContext.implied_volatility` (the top-level field) is
+   averaged from.
+2. **Deep-ITM, long-dated** (`ITM_STRIKE_LOW_PCT`-`ITM_STRIKE_HIGH_PCT` of
+   spot, i.e. 60%-140%, filtered server-side to `ITM_MIN_DAYS_TO_EXPIRY`+
+   days via `--expiration-date-gte`): added because `ai-strategy`'s
+   strategy specifically needs these (a near-the-money option
+   mathematically can't survive chaos-sandbox's stress test regardless of
+   expiry — see `services/ai-strategy/README` or `CLAUDE.md` for the real
+   Black-Scholes numbers behind that). Without this second fetch, those
+   contracts simply wouldn't be in the data `ai-strategy` receives at all.
+
+The two windows overlap for long-dated contracts already near the money -
+harmless, the merge just re-writes identical data for those symbols.
+
 ## Order execution — `order_details` conventions
 
 `TradeProposal.order_details` is a loose `dict` by design
