@@ -1,6 +1,6 @@
 # chaos-sandbox (:8003)
 
-Tek bacaklı long opsiyon tekliflerini üç sabit senaryoyla yeniden fiyatlayan
+Tek bacaklı long opsiyonları ve net-debit çok bacaklı opsiyon spread'lerini üç sabit senaryoyla yeniden fiyatlayan
 deterministik FastAPI servisi. LLM, E2B, dinamik kod üretimi, kod çalıştırma,
 piyasa verisi indirme veya harici finans kütüphanesi kullanmaz. Çalışırken Redis,
 broker, internet veya başka bir servise ihtiyaç duymaz. HTTP/validasyon altyapısı
@@ -14,7 +14,7 @@ bu üç senaryoda kaybın eşiği aşmadığını belirtir; işlem veya kâr gar
 - `GET /health` → `200 {"status":"ok","service":"chaos-sandbox"}`.
 - `POST /stress-test`: doğrudan `contracts.schemas.TradeProposal` alır;
   `contracts.schemas.ChaosTestResult` döndürür. Envelope kullanılmaz.
-- `BUY`: tek long call veya put için hesaplama yapar.
+- `BUY`: tek long call/put veya `order_details.legs` içeren net-debit spread için hesaplama yapar.
 - `HOLD`: `order_details` içeriğini doğrulamadan güvenli ve `0.0` skorla döner.
   Tek log tam olarak `HOLD: no position will be opened; stress testing skipped` olur.
 - `SELL`: kapanış/satış ayrımı veya short margin modeli olmadığı için tüm SELL
@@ -24,6 +24,10 @@ bu üç senaryoda kaybın eşiği aşmadığını belirtir; işlem veya kâr gar
   zaman çalıştırılmaz, diğer teklif alanlarıyla birlikte aynen geri verilir.
 - `refined_proposal` miktar, fiyat, metadata ve içerik bakımından değiştirilmez;
   yerel doğrulamanın varsayılanları bile bu alana eklenmez.
+
+`legs` bulunmayan BUY teklifi mevcut tek-bacak modeline, `legs` bulunan teklif
+spread modeline yönlendirilir. Net-credit spread'ler ile closing/rolling
+bacakları geçerli bir risk sonucu olarak fail-closed veto edilir.
 
 Geçersiz BUY verisi alan bazlı `422` döndürür; örneğin eksik strike:
 
@@ -57,6 +61,35 @@ Tanımlanmayan ekstra alanlar da reddedilir.
 | `option_symbol` | String veya null; metadata | `null` |
 | `delta` | Sonlu sayı veya null; hesaplamada kullanılmaz | `null` |
 
+### Multi-leg spread order_details
+
+Spread teklifi üst seviyede `direction` (`bullish`/`bearish`), pozitif tamsayı
+`quantity`, sıfır olmayan net `limit_price`, pozitif `spot_price`, 2–4 elemanlı
+`legs` listesi ve isteğe bağlı `strategy_type`, `risk_free_rate` (`0.04`),
+`contract_multiplier` (`100`), `time_in_force` (`day`) taşır. Pozitif
+`limit_price` net debit, negatif değer net credit anlamındadır; bu sürüm yalnızca
+pozitif net debit'i hesaplar.
+
+Her leg aşağıdaki alanları taşır:
+
+| Alan | Kural |
+|---|---|
+| `symbol` veya `option_symbol` | Opsiyon kontrat sembolü |
+| `option_type` | `call` veya `put` |
+| `strike` | Pozitif |
+| `implied_volatility` | `0 < IV <= 5` |
+| `days_to_expiry` | Negatif olmayan tamsayı |
+| `bid`, `ask` | `bid >= 0`, `ask > 0`, `ask >= bid` |
+| `ratio_qty` | Pozitif tamsayı; varsayılan `1` |
+| `side` | `buy` veya `sell` |
+| `position_intent` | `buy_to_open`, `sell_to_open`, `buy_to_close`, `sell_to_close` |
+
+`side`, `position_intent` ile aynı yönde olmalıdır. Kontrat sembolü OCC biçiminde
+olmalı; semboldeki underlying/type/strike, teklif alanlarıyla eşleşmelidir.
+Chaos fiyatlaması için IV/vade/bid/ask değerleri kontrat sembolünden varsayılmaz.
+Hesaplanacak net-debit opening spread'lerin bacakları aynı vadeyi taşımalı ve
+vade sonu payoff'u negatif veya yukarı yönde sınırsız zararlı olmamalıdır.
+
 Üst seviye `TradeProposal` ayrıca `strategy_id`, `action`, `symbol`,
 `generated_code`, `conviction_score` alanlarını gerektirir. Eksik piyasa verisi
 üst seviye alanlardan veya başka servislerden türetilmez.
@@ -80,6 +113,13 @@ Her senaryo aynı orijinal girdiden başlar; şoklar birleştirilmez, zaman iler
    `spot_stressed = spot * 1.10`; diğer fiyatlama girdileri aynı kalır.
    `exit_price = BlackScholes(spot_stressed)`.
 
+Spread tekliflerinde aynı şok her bacağın kendi strike, IV, vade ve kotasyonuna
+ayrı uygulanır. Bir buy leg pozisyon değerine pozitif, sell leg negatif katkı
+yapar. Spread şokunda buy leg teorik fiyat eksi yarım stresli spread'den
+satılıyor; sell leg teorik fiyat artı yarım stresli spread maliyetiyle geri
+alınıyor. IV ve adverse-move senaryolarında her bacağın stresli teorik değeri
+işareti ve `ratio_qty` ile netleştirilir.
+
 IV ve fiyat şoklarında çıkış fiyatı teorik değerdir; ilave spread kesintisi
 uygulanmaz. Bu tercih her şokun etkisini ayrı ölçer. Spread senaryosunda merkez,
 kotasyon midpoint'i yerine istenen formüldeki teorik fiyattır.
@@ -91,6 +131,16 @@ pnl         = exit_total - entry_total
 loss_pct    = max(0, (entry_total - exit_total) / entry_total)
 stress_score = min(1, max(scenario.loss_pct for scenario in scenarios))
 is_safe      = stress_score <= max_stress_loss_pct
+```
+
+Net-debit spread için de aynı karar formülü kullanılır:
+
+```text
+entry_total = positive_net_debit * quantity * contract_multiplier
+net_exit_price = sum(position_sign * leg_exit_price * ratio_qty)
+exit_total = net_exit_price * quantity * contract_multiplier
+pnl = exit_total - entry_total
+loss_pct = max(0, (entry_total - exit_total) / entry_total)
 ```
 
 Skor ortalama kayıp değil, en kötü kayıptır. Eşiğe eşit kayıp güvenlidir.
@@ -131,7 +181,7 @@ python -m pytest services/chaos-sandbox/tests -q
 ```
 
 Testler fiyat referanslarını, bağımsız şokları, PnL/score hesaplarını, eşik
-sınırlarını, input/env doğrulamasını, HOLD/SELL davranışını, deterministik
+sınırlarını, tek ve çok bacaklı input doğrulamasını, HOLD/SELL davranışını, deterministik
 cevapları, hata yalıtımını ve ortak kontratı gerçek harici servise bağlanmadan test eder.
 Test paketleri `requirements-dev.txt` içindedir; production image'a kurulmaz.
 
@@ -163,12 +213,18 @@ curl --fail-with-body http://localhost:8003/stress-test \
 curl --fail-with-body http://localhost:8003/stress-test \
   -H 'Content-Type: application/json' \
   --data-binary @services/chaos-sandbox/examples/buy-safe.json
+
+curl --fail-with-body http://localhost:8003/stress-test \
+  -H 'Content-Type: application/json' \
+  --data-binary @services/chaos-sandbox/examples/spread-buy.json
 ```
 
 - [BUY isteği](examples/buy.json) → HTTP `200`, `is_safe=false`;
   [tam veto cevabı](examples/veto-response.json).
 - [Güvenli BUY isteği](examples/buy-safe.json) → HTTP `200`, `is_safe=true`;
   [tam başarılı cevap](examples/safe-response.json).
+- [İki bacaklı call debit spread isteği](examples/spread-buy.json) → her leg
+  ayrı fiyatlanır, net spread kaybı üzerinden `SAFE` veya `VETO` kararı verilir.
 
 Her cevapta orijinal teklif tamamen `refined_proposal` içine alınır. Yanıtı
 ortak kontratla kontrol etmek için çıktıyı bir dosyaya kaydedip
@@ -185,8 +241,12 @@ doğrulamayı `ChaosTestResult.model_validate(response.json())` ile yapar.
 - `option_symbol` ve `delta` yalnızca metadata olarak korunur. Sembolün strike,
   tür veya tarih alanlarıyla tutarlılığı ve kotasyon güncelliği doğrulanmaz.
   Verilen `days_to_expiry` kullanılır; sistem saati hesaplamaya katılmaz.
-- Birden fazla bacak ve short pozisyonlar desteklenmez. Mevcut SELL sözleşmesi
-  long kapamayı short açmadan ayırmadığından tüm SELL işlemleri veto edilir.
+- Net-debit BUY spread içinde `sell_to_open` leg desteklenir. Net-credit,
+  closing/rolling spread ve üst seviye SELL işlemleri, gerekli margin veya mevcut
+  pozisyon maliyet modeli bulunmadığı için fail-closed veto edilir.
+- `direction`, adverse spot şokunun yönünü belirler; yönsüz stratejiler bu
+  sürümde desteklenmez. Vade sonu payoff'unun sınırlı olduğu doğrulanır; güvenlik
+  skoru ise tüm olası piyasa yolları yerine yapılandırılmış üç sabit senaryoyu ölçer.
 - Çok uç ama sonlu girdiler kayan nokta kapasitesini aşarsa HTTP `500` döner;
   risk/execution katmanı hata veya `is_safe=false` sonucunda ilerlememelidir.
 - Kök `test_pipeline.py` şu anda mock transport kullanır ve örnek teklifi bu

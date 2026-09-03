@@ -1,0 +1,43 @@
+{
+  "strategy_id": "call-debit-spread-v1",
+  "action": "BUY",
+  "symbol": "AAPL",
+  "generated_code": "",
+  "conviction_score": 0.85,
+  "order_details": {
+    "strategy_type": "call_debit_spread",
+    "direction": "bullish",
+    "quantity": 1,
+    "limit_price": 3.00,
+    "spot_price": 189.50,
+    "risk_free_rate": 0.04,
+    "contract_multiplier": 100,
+    "time_in_force": "day",
+    "legs": [
+      {
+        "symbol": "AAPL261016C00190000",
+        "option_type": "call",
+        "strike": 190.00,
+        "implied_volatility": 0.27,
+        "days_to_expiry": 43,
+        "bid": 5.00,
+        "ask": 5.20,
+        "ratio_qty": 1,
+        "side": "buy",
+        "position_intent": "buy_to_open"
+      },
+      {
+        "symbol": "AAPL261016C00200000",
+        "option_type": "call",
+        "strike": 200.00,
+        "implied_volatility": 0.25,
+        "days_to_expiry": 43,
+        "bid": 2.00,
+        "ask": 2.20,
+        "ratio_qty": 1,
+        "side": "sell",
+        "position_intent": "sell_to_open"
+      }
+    ]
+  }
+}

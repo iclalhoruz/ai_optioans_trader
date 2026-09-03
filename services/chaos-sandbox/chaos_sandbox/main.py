@@ -7,7 +7,7 @@ from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
 
 from contracts.schemas import ChaosTestResult, TradeProposal
-from chaos_sandbox.models import OptionStressInputs
+from chaos_sandbox.models import parse_stress_inputs
 from chaos_sandbox.settings import Settings
 from chaos_sandbox.stress_engine import ChaosSandbox
 
@@ -29,7 +29,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # JSON serializable, and a bad field should never leak an entire body.
         if proposal.action == "BUY":
             try:
-                OptionStressInputs.model_validate(proposal.order_details)
+                parse_stress_inputs(proposal.order_details)
             except ValidationError as exc:
                 errors = [
                     {**error, "loc": ("body", "order_details", *error["loc"])}
