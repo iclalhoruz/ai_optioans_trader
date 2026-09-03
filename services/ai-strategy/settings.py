@@ -12,33 +12,38 @@ class Settings(BaseSettings):
     featherless_base_url: str = "https://api.featherless.ai/v1"
     featherless_model: str
 
-    # How many contracts get shown to the LLM - the raw chain can be 700+
-    # contracts, way too many tokens for one prompt.
-    contracts_in_prompt: int = 12
+    # Proposes defined-risk vertical spreads (bull call / bear put), not
+    # naked single-leg options - chaos-sandbox now models multi-leg P&L
+    # (services/chaos-sandbox, "Support multi-leg net-debit spread stress
+    # tests"). A single deep-ITM long option was checked exhaustively
+    # (ITM% x DTE grid, real Black-Scholes) to have NO combination that
+    # clears both chaos-sandbox's 35% stress threshold and risk-engine's
+    # 5% MAX_ALLOCATION_PCT cap for any of the watchlist's higher-priced
+    # tickers - a spread's short leg funds part of the cost and caps the
+    # max loss, which is strictly better on both fronts. Verified live with
+    # a real AAPL spread search: a 15%-ITM long leg, a short leg targeting
+    # ~10% of spot wider (actual width often ends up larger - real strike
+    # increments are coarser than the target and spread_max_debit_to_width_
+    # ratio below walks to whichever strike keeps the risk/reward sane),
+    # ~270 days out, costing ~$2,000-3,000/contract with 20-30% real
+    # stress-test margin (vs. a single-leg deep-ITM equivalent costing
+    # $10,000+).
+    spread_long_itm_pct: float = 0.15
+    spread_width_pct: float = 0.10
+    spread_target_days_to_expiry: int = 270
+    spread_min_days_to_expiry: int = 90
+    # Checked live across several real widths on the same AAPL snapshot:
+    # narrower spreads (debit consuming ~80% of the width) came back with
+    # a stress score close to the 35% veto line (29-31%) - fine on that
+    # exact snapshot, but real IV/price move enough between requests that
+    # the same-shaped spread failed outright a few minutes later (45.5%).
+    # Wider spreads (debit ~65-69% of width) consistently scored better
+    # (23-25%) with real margin against that kind of noise. This caps how
+    # much of the width the net debit may consume; candidate selection
+    # walks to a wider strike instead of accepting a spread that fails it.
+    spread_max_debit_to_width_ratio: float = 0.68
 
-    # A single long option is extremely leveraged - checked live with the
-    # real Black-Scholes math in chaos_sandbox/pricing.py: an at-the-money
-    # call loses 60-100% of its value on chaos-sandbox's 10%-adverse-move
-    # scenario regardless of expiry, and even a deep (40%) ITM 30-day call
-    # still loses ~25%. Only deep-ITM, long-dated contracts (where the
-    # option behaves close to the underlying itself) realistically clear
-    # its 35% veto threshold - so the strategy only ever considers
-    # contracts at least this deep ITM and at least this many days out,
-    # matching broker-gateway's ITM_STRIKE_LOW_PCT/HIGH_PCT/
-    # ITM_MIN_DAYS_TO_EXPIRY window (alpaca_client.py) that fetches them.
-    target_itm_pct: float = 0.25
-    min_days_to_expiry: int = 180
-    # Picking the *longest* available expiration per strike (an earlier
-    # version of this) maximized stress-test margin but pushed selections
-    # out to 2027-2028 - real cost for a deep-ITM contract that far out
-    # priced nearly every trade out of a sane risk budget (verified live:
-    # AAPL/NVDA both came back "too expensive" at 2% allocation). 365 days
-    # still clears chaos-sandbox with real margin (~30% loss vs the 35%
-    # veto, per the same pricing grid) without the extra cost of going
-    # multiple years out.
-    target_days_to_expiry: int = 365
-
-    # For sizing a real quantity instead of always proposing 1 contract -
+    # For sizing a real quantity instead of always proposing 1 spread -
     # broker-gateway/GET /account is the source of truth for portfolio
     # value (matches how risk-engine is supposed to get it too).
     broker_gateway_url: str = "http://localhost:8001"

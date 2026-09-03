@@ -119,10 +119,31 @@ def _strategy_decision(proposal: Optional[TradeProposal]) -> dict:
         "symbol": proposal.symbol,
         "action": proposal.action,
         "direction": direction,
-        "description": details.get("description", f"{proposal.action} {proposal.symbol}"),
+        "description": _describe_proposal(proposal),
         "convictionPct": round(proposal.conviction_score * 100),
         "reasoning": details.get("reasoning", ""),
     }
+
+
+def _describe_proposal(proposal: TradeProposal) -> str:
+    """A human-readable one-liner. chaos-sandbox's SpreadStressInputs is
+    extra="forbid", so ai-strategy can't just add a "description" key to
+    order_details for a spread the way single-leg once could - this builds
+    one from the legs data that's already there instead, so a spread shows
+    as something more useful than a generic "BUY AAPL"."""
+    details = proposal.order_details
+    if details.get("description"):
+        return details["description"]
+
+    legs = details.get("legs")
+    if legs:
+        long_leg = next((leg for leg in legs if leg.get("side") == "buy"), None)
+        short_leg = next((leg for leg in legs if leg.get("side") == "sell"), None)
+        if long_leg and short_leg:
+            option_type = long_leg.get("option_type", "option")
+            return f"{option_type} spread: buy {long_leg.get('strike')} / sell {short_leg.get('strike')}"
+
+    return f"{proposal.action} {proposal.symbol}"
 
 
 def _chaos_sandbox_state(state: PipelineState) -> dict:

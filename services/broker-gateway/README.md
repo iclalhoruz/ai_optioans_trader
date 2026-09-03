@@ -137,14 +137,38 @@ at doing precise arithmetic over a table of rows.
 `services/broker-gateway/position_manager.py` is the counterpart to
 `ai-strategy`'s entry decision: without it, a filled position just sits
 held until expiration regardless of P&L, which isn't risk management, it's
-"buy and forget." `POST /positions/manage` checks every open position
-against three deterministic (no LLM) rules and closes any that trigger:
+"buy and forget." `POST /positions/manage` groups every open position by
+`(underlying, expiration_date)`, checks each group against three
+deterministic (no LLM) rules using its **net** P&L across all its
+positions, and closes the whole group together if one triggers:
 
-- **Take-profit**: `unrealized_plpc >= TAKE_PROFIT_PCT` (25% default)
-- **Stop-loss**: `unrealized_plpc <= -STOP_LOSS_PCT` (20% default)
+- **Take-profit**: net `unrealized_plpc >= TAKE_PROFIT_PCT` (25% default)
+- **Stop-loss**: net `unrealized_plpc <= -STOP_LOSS_PCT` (20% default)
 - **Expiring soon**: `days_to_expiry <= MIN_DAYS_BEFORE_CLOSE` (14 default) -
-  parsed from the position's own OCC symbol via `_parse_occ_symbol`, no
+  parsed from each position's own OCC symbol via `_parse_occ_symbol`, no
   extra API call needed
+
+**Grouping (not per-position evaluation) is load-bearing, not a nicety —
+found and fixed live, not in review.** Alpaca lists each leg of a filled
+multi-leg spread as its own separate position with its own independent
+`unrealized_pl`/`unrealized_plpc`. An earlier version of this evaluated
+and closed positions independently, which can trigger take-profit on one
+leg while leaving the other open — turning a *defined-risk* spread into an
+accidental naked position with *unbounded* risk. This actually happened in
+testing: it closed exactly the profitable leg of a real spread and left
+the losing leg (-57%) open.
+
+**Close order within a group matters too — also found live, not in
+review.** Closing the long leg first while the short leg is still open
+leaves an "uncovered" short position; Alpaca rejected that outright
+(`account not eligible to trade uncovered option contracts`) on a real
+order, and the pre-fix code then went ahead and closed the *short* leg
+anyway — leaving the wrong leg (a naked long) open instead of a flat
+position. Short legs are now closed first (always safe — a long remaining
+alone is never "uncovered"), and if a short leg's close fails, the group's
+long leg(s) are deliberately **not** attempted (would create the exact
+uncovered position above) — the group is left in its original, still-
+hedged shape for the next cycle instead.
 
 Deliberately **not** wired into `workflow/pipeline.py`'s entry pipeline
 (market context → proposal → stress test → risk gate → execute) - closing
@@ -153,25 +177,33 @@ a fresh proposal/stress-test/veto cycle the way opening one does.
 `workflow/scheduler.py` calls this once per autonomous cycle, right
 alongside triggering new-entry runs.
 
-**Verified live**: manually triggered this against two real open positions
-(leftover legs from the earlier multi-leg test) - one hit take-profit and
-closed correctly; the other (at -57%, well past stop-loss) initially failed
-to close in the same call (a transient rejection, likely from closing
-another leg of the same former multi-leg position moments earlier) but
-closed cleanly on retry. That failure mode is why `manage_positions()`
-reports `closed: false` with the error for anything that doesn't actually
-close, instead of only ever reporting successes.
+**Verified live end-to-end after both fixes**: opened a real 2-leg AAPL
+spread, forced a stop-loss trigger (temporary threshold override, not
+mocked), and confirmed the short leg closed first, the long leg closed
+second, and the account ended fully flat (zero open positions) — plus one
+aggregated `trade_log` entry with the correct net realized P&L (see below),
+not two misleadingly-independent ones. `manage_positions()` still reports
+`closed: false` with the error for any leg that doesn't actually close,
+rather than only ever reporting successes.
 
 ## Trade log & P&L — `services/broker-gateway/trade_log.py`
 
 A Redis-backed record of what this system actually did - not a backtest,
-a real forward trade log. `POST /execute-order` records an "open" entry
-for any real fill; `POST /positions/manage` records a "close" entry (with
-realized P&L) for anything it closes. `GET /pnl` aggregates the closed
-entries into `totalRealizedPnl`/`closedTradeCount`/`winCount`/
-`winRatePct`. This is what makes "is the autonomous system actually making
-money" answerable with real numbers instead of "the pipeline ran
-successfully" - those are different claims.
+a real forward trade log. `POST /execute-order` records one "open" entry
+per trade (already correct - one proposal, one entry). `POST
+/positions/manage` records **one "close" entry per closed group, not one
+per leg** - summing all its legs' realized P&L into a single net figure.
+This wasn't the original behavior and was a real bug, not a style choice:
+logging per-leg closes meant a single net-profitable spread trade (one
+leg down individually, the other up more) could count as "1 win + 1 loss"
+in `GET /pnl`'s `winCount`/`winRatePct`, understating a system that's
+actually working. `GET /pnl` aggregates the closed entries into
+`totalRealizedPnl`/`closedTradeCount`/`winCount`/`winRatePct` - now
+one-count-per-trade, matching what "trade" actually means for this
+strategy. This is what makes "is the autonomous system actually making
+money" answerable with real, trustworthy numbers instead of "the pipeline
+ran successfully" - those are different claims, and a wrong win-rate would
+have undermined the first one specifically.
 
 ## Order execution — `order_details` conventions
 

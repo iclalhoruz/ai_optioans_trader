@@ -62,7 +62,12 @@ async def manage_positions(client: httpx.AsyncClient) -> None:
     # that trigger. Without this the autonomous loop only ever opens new
     # positions and never manages the ones it already has.
     try:
-        response = await client.post(f"{BROKER_GATEWAY_URL}/positions/manage", timeout=30.0)
+        # Longer than trigger_run's timeout on purpose - with the watchlist
+        # now at 15 tickers, a cycle with many spreads to evaluate/close
+        # (2 legs each, closed sequentially) can take a while; a timeout
+        # here just delays cleanup to the next cycle rather than losing
+        # anything, but there's no reason to cut it close.
+        response = await client.post(f"{BROKER_GATEWAY_URL}/positions/manage", timeout=60.0)
         response.raise_for_status()
         closed = [r for r in response.json() if r.get("closed")]
         if closed:

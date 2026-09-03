@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 # `uvicorn main:app` does - .env sits at the repo root, three levels up.
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
+import redis.exceptions  # noqa: E402
 from fastapi import FastAPI, Request  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import JSONResponse  # noqa: E402
@@ -55,6 +56,18 @@ async def handle_alpaca_cli_error(_: Request, exc: AlpacaCLIError) -> JSONRespon
     # instead of a try/except in every endpoint means none of them can
     # forget to catch it and leak an unhandled 500.
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.message})
+
+
+@app.exception_handler(redis.exceptions.RedisError)
+async def handle_redis_error(_: Request, exc: redis.exceptions.RedisError) -> JSONResponse:
+    # runs.py's endpoints go through PipelineOrchestrator, which hits Redis
+    # on every call (persist/read run state, the recent-runs index) - a
+    # Redis blip (container restart, network hiccup) would otherwise leak
+    # as a bare "Internal Server Error" with no indication of the real
+    # cause. 503 is the honest status here: the request was fine, a
+    # downstream dependency wasn't available - a caller (scheduler,
+    # frontend) should treat this as retryable, not a 500-worthy bug.
+    return JSONResponse(status_code=503, content={"detail": f"state store unavailable: {exc}"})
 
 
 @app.get("/market-context/{ticker}", response_model=MarketContext)

@@ -1,11 +1,12 @@
 # Aegis-OptionAI — ai-strategy
 
 The LLM decision layer. Takes `broker-gateway`'s `MarketContext` for one
-ticker and decides whether to buy a single option contract (a call or a
-put) or do nothing this cycle. Never generates or executes code, never
-talks to Alpaca itself, never has execution access — `chaos-sandbox` and
-`risk-engine` are the independent, deterministic checks that keep this
-proposal honest before anything real happens.
+ticker and decides whether to buy a defined-risk vertical spread (a bull
+call spread or a bear put spread) or do nothing this cycle. Never
+generates or executes code, never talks to Alpaca itself, never has
+execution access — `chaos-sandbox` and `risk-engine` are the independent,
+deterministic checks that keep this proposal honest before anything real
+happens.
 
 ## Endpoints
 
@@ -14,158 +15,114 @@ proposal honest before anything real happens.
 | `POST /generate-proposal` | Takes a `MarketContext`, returns a `TradeProposal`. Where `workflow/pipeline.py` calls this service. |
 | `GET /health` | Liveness check. |
 
-## Why every offered contract is deep ITM and long-dated
+## Why a spread, not a single contract
 
-This wasn't a style choice — it's the direct consequence of a real
-calculation. `chaos-sandbox`'s stress test vetoes any proposal whose
-worst-case loss under its `ADVERSE_MOVE` scenario (a 10% move in the
-underlying, against the position) exceeds 35%. Checked live with
-`chaos_sandbox/pricing.py`'s actual Black-Scholes function before writing
-any selection logic:
+This service originally proposed a single deep-ITM, long-dated long option.
+Checked exhaustively with `chaos_sandbox/pricing.py`'s real Black-Scholes
+function (ITM% × DTE grid) that **there is no combination for a
+higher-priced ticker (the whole watchlist: AAPL/TSLA/NVDA/SPY/MSFT) that
+clears both `chaos-sandbox`'s 35% stress-test threshold and risk-engine's
+5% `MAX_ALLOCATION_PCT` cap at once** — a single deep-ITM contract on a
+$300+ stock can cost $10,000+, well over 5% of a $100k account regardless
+of expiry.
 
-| DTE | ATM (0% ITM) | 20% ITM | 30% ITM | 40% ITM |
-|---|---|---|---|---|
-| 30 | 62% loss | 46% | 33% | 25% |
-| 90 | 56% | 43% | 32% | 25% |
-| 180 | 46% | 38% | 30% | 24% |
-| 365 | 37% | 32% | 27% | 23% |
+A defined-risk **vertical spread** fixes both problems at once: the short
+leg funds part of the cost (cheaper) and caps the maximum loss at the net
+debit paid (safer), so it clears both constraints with real margin at a
+fraction of the capital. `chaos-sandbox` added multi-leg net-debit spread
+support (`SpreadStressInputs`/`calculate_spread_scenarios`, see
+`services/chaos-sandbox/README.md`) specifically to unlock this —
+`broker-gateway`'s multi-leg execution was already ready and live-tested
+before that.
 
-A single long option is extremely leveraged — an at-the-money call loses
-roughly 60–100% of its value under a 10% adverse move **regardless of
-expiry**, and even a 40%-deep-ITM 30-day call still loses ~25%. Only
-contracts deep enough ITM and far enough dated (where the option behaves
-close to owning the underlying itself, rather than a highly leveraged bet)
-realistically clear the 35% threshold with real margin. A near-the-money
-or short-dated strategy would have been architecturally correct but would
-never have actually gotten a trade past `chaos-sandbox` — bad for the
-hackathon's P&L judging criterion even though everything else "worked."
+## How spread selection actually works
 
-**This is a real, deliberate scope limitation of the system today, not a
-permanent one.** `broker-gateway` already supports multi-leg (spread)
-orders — live-tested with a real filled call spread — because a defined-risk
-spread's max loss is capped at the net debit paid, so it would survive
-`ADVERSE_MOVE` at much shorter dates and closer-to-the-money strikes.
-`chaos-sandbox` doesn't model multi-leg P&L yet (explicitly scoped to
-single-leg long options in its own README), so `ai-strategy` doesn't
-propose spreads — not because the architecture can't, but because the one
-service that would need to evaluate the risk of one doesn't yet.
-
-**Does `ai-strategy` support spreads? No — deliberately not, and it's not
-a gap in this service specifically.** `broker-gateway`'s `execute_order`
-already accepts a `legs` list in `order_details` and genuinely executes a
-multi-leg order (verified live). But `chaos-sandbox`'s `OptionStressInputs`
-has no `legs` field at all and uses `extra="forbid"` — sending one would
-get the whole proposal rejected with `422 extra_forbidden` before it ever
-reached risk-engine or execution. So even though the *execution* layer is
-ready, proposing a spread today would just break the pipeline one step
-later. `ai-strategy` only ever builds single-leg `order_details` for
-exactly this reason. Adding spread support here would be pointless without
-`chaos-sandbox` growing multi-leg P&L modeling first.
-
-## How contract selection actually works
-
-`llm.py`'s `_select_contracts_for_prompt`:
+`llm.py`'s `_select_spread_candidates` builds **up to two candidates** — one
+bull call spread, one bear put spread — so the model gets a genuine
+bullish-or-bearish choice, or neither:
 
 1. Filters `MarketContext.chain_summary.contracts` to ones with a live,
-   non-crossed bid/ask, a real (non-`None`) `implied_volatility`, and
-   `days_to_expiry >= MIN_DAYS_TO_EXPIRY` (180 by default).
-2. Groups by option type and, within each, keeps **one contract per
-   distinct strike** — whichever expiration is closest to
-   `TARGET_DAYS_TO_EXPIRY` (365 by default). An earlier version picked the
-   *longest*-dated expiration per strike for maximum stress-test margin,
-   but that pushed real selections out to 2027-2028 - the extra time value
-   made even a single contract too expensive for any sane risk budget
-   (verified live, see "Position sizing" below). 365 days still clears
-   chaos-sandbox with real margin (~30% loss vs. its 35% veto) without that
-   extra cost. Without this per-strike reduction at all, a single strike
-   listed across many expirations (common in real chains) would crowd out
-   genuinely different strikes.
-3. Ranks each group by closeness to `TARGET_ITM_PCT` (25% by default) —
-   `spot * (1 - 0.25)` for calls, `spot * (1 + 0.25)` for puts.
-4. Takes half of `CONTRACTS_IN_PROMPT` from calls and half from puts, so
-   the model gets a genuine bullish-or-bearish choice instead of whichever
-   side happened to have a strike land closer to target.
+   non-crossed bid/ask, a real `implied_volatility`, and
+   `days_to_expiry >= SPREAD_MIN_DAYS_TO_EXPIRY` (90 default).
+2. Picks the expiration closest to `SPREAD_TARGET_DAYS_TO_EXPIRY` (270
+   default) and a long leg near `SPREAD_LONG_ITM_PCT` ITM (15% default).
+3. Picks a short leg further out of the money on the *same* expiration
+   (chaos-sandbox's `SpreadStressInputs` requires every leg to share one
+   `days_to_expiry` for a debit spread to be evaluable at all) — but not
+   just the nearest strike to a target width. **Real strike increments
+   (e.g. $10 apart on AAPL's far-dated chain) are coarser than a naive
+   width target** — checked live and found the nearest-to-target short
+   strike could leave a net debit consuming almost the entire width (a
+   real case: $9.47 debit on a $10-wide spread, $0.53 max gain — an
+   unusably bad risk/reward). So it walks short-strike candidates ordered
+   by closeness to `SPREAD_WIDTH_PCT` of spot (10% default) and keeps the
+   first one where the net debit doesn't exceed
+   `SPREAD_MAX_DEBIT_TO_WIDTH_RATIO` (68% default) of the strike width.
 
-This depends on `broker-gateway` actually having deep-ITM contracts to
-offer in the first place — its `get_market_context` fetches a second,
-targeted strike band (60%–140% of spot, filtered server-side to 180+ days
-out) specifically for this; see `services/broker-gateway/README.md`.
+**That ratio cap was itself tuned against live, moving market data, not
+guessed.** Tested the same AAPL long leg against five different short
+strikes on one consistent snapshot: a narrower spread (debit ~80-90% of
+width) scored close to the 35% veto line (29-31%) — fine on that exact
+snapshot, but a same-shaped spread failed outright (45.5%) a few minutes
+later once real IV/price had moved. Wider spreads (debit ~65-69% of width)
+scored consistently better (23-25%) with real margin against that kind of
+noise, which is why the ratio is capped where it is.
 
 ## Price trend — real evidence for the model's directional call
 
-Earlier versions of this service showed the model only a single
-point-in-time snapshot (spot price, IV, the candidate contracts) - no
-basis at all to form a genuine directional (bullish/bearish) view, just a
-plausible-sounding guess. `broker-gateway` now also fetches
-`chain_summary.price_trend` (recent % change over a few windows, distance
-from the recent high/low, realized volatility - all computed in code, not
-handed to the model as raw bars) and it's included in the prompt. Still no
-guarantee of real predictive edge, but it's the difference between
-reasoning over real, if modest, momentum evidence and reasoning over
-nothing at all.
+`broker-gateway` fetches `chain_summary.price_trend` (recent % change over
+a few windows, distance from the recent high/low, realized volatility -
+all computed in code, not handed to the model as raw bars) and it's
+included in the prompt. Still no guarantee of real predictive edge, but
+it's the difference between reasoning over real, if modest, momentum
+evidence and reasoning over nothing at all. Verified this is genuinely
+used, not decorative: a real `INTC` run produced a `HOLD` explicitly
+citing "negative momentum over both 5 and 20 days."
 
-## Position sizing — not always 1 contract anymore
+## Position sizing — not always 1 spread
 
-`quantity` used to be hardcoded to `1` regardless of conviction or
-portfolio size. `_size_quantity` now computes a real number:
-`portfolio_value * TARGET_ALLOCATION_PCT * conviction_score`, divided by
-the contract's cost (`ask * 100`), capped at `MAX_CONTRACTS_PER_TRADE` (5
-default). `portfolio_value` comes from a live call to `broker-gateway`'s
-`GET /account` right before sizing (falls back to a conservative 1
-contract if that call fails - a portfolio-value hiccup shouldn't block a
-trade the model already decided on).
-
-**If even 1 contract costs more than the computed budget, the proposal
-degrades to `HOLD`** with a clear reason - rather than either forcing an
-oversized position or crashing. This is common, not a bug: verified live
-with the real numbers that for a $330 stock (an AAPL-priced ticker) at
-25% ITM and 365 days out, a single contract can cost upwards of $10,000 -
-there is **no** combination of ITM depth and expiry for a stock in that
-price range that clears both chaos-sandbox's 35% stress-test threshold
-*and* risk-engine's 5% `MAX_ALLOCATION_PCT` cap at once (checked
-exhaustively across ITM% × DTE, zero combinations satisfy both). This is a
-real, structural property of single-leg long options on higher-priced
-underlyings, not a tuning bug - a defined-risk spread would cost only the
-net debit paid (much less), which is the actual fix, contingent on
-chaos-sandbox modeling multi-leg risk (see "Does this support spreads?"
-below). Until then, expect `HOLD` to be a common, correct outcome for
-higher-priced tickers - the system staying honest about what it can safely
-afford is the point, not a failure.
+`quantity` used to be hardcoded to `1`. `_size_quantity` now computes a
+real number: `portfolio_value * TARGET_ALLOCATION_PCT * conviction_score`,
+divided by the spread's net debit (`ask - bid`, not a single option's
+cost), capped at `MAX_CONTRACTS_PER_TRADE` (5 default). `portfolio_value`
+comes from a live call to `broker-gateway`'s `GET /account` right before
+sizing (falls back to a conservative 1 spread if that call fails - a
+portfolio-value hiccup shouldn't block a trade the model already decided
+on). **If even 1 spread costs more than the computed budget, the proposal
+degrades to `HOLD`** with a clear reason, rather than forcing an oversized
+position or crashing.
 
 ## What the model actually decides — and what it doesn't
 
-The model is shown a JSON payload (ticker, spot price, IV, and the
-selected contracts — symbol, type, strike, DTE, bid/ask, IV, delta) and
-asked to return:
+The model is shown a JSON payload (ticker, spot price, IV, price trend, and
+the candidate spreads — each with its long/short leg symbols and strikes,
+days to expiry, net debit, and max gain) and asked to return:
 
 ```json
 {
   "action": "BUY" or "HOLD",
-  "contract_symbol": "<one of the symbols it was shown, or omitted for HOLD>",
+  "spread_id": "<one of the spread_id values it was shown, or omitted for HOLD>",
   "conviction_score": 0.0-1.0,
   "reasoning": "one or two sentences"
 }
 ```
 
-It only ever picks **which contract** and **a direction/conviction** —
-never `SELL` (chaos-sandbox has no short-margin model, would veto it
-regardless, so the prompt doesn't even offer it as an option). **Every
-number in the resulting `TradeProposal.order_details` is looked up from
-the real chain data the model was shown, never taken from the model's own
-arithmetic** — it can be wrong about which contract looks good, it can't
-be wrong about what that contract actually costs. `quantity` is fixed at
-`1` for this version — no portfolio-aware position sizing yet, deliberately
-simple.
+It only ever picks **which spread** (bullish or bearish) and a
+**conviction** — never `SELL` (this system has no short-margin/naked-sell
+support). **Every number in the resulting `TradeProposal.order_details` is
+looked up from the real market data the model was shown, never taken from
+the model's own arithmetic** — it can be wrong about which spread looks
+good, it can't be wrong about what that spread actually costs.
 
-`order_details` for a `BUY` contains *only* the fields
-`chaos-sandbox`'s `OptionStressInputs` model accepts (`option_type`,
-`quantity`, `limit_price`, `spot_price`, `strike`, `implied_volatility`,
-`days_to_expiry`, `bid`, `ask`) — no `symbol`/`direction`/`description`/
-`reasoning`. Those would collide with `OptionStressInputs`'s
-`extra="forbid"` schema (verified live: adding them gets the whole request
-rejected with `422 extra_forbidden`). `runs.py`'s `_strategy_decision()`
-already degrades gracefully with defaults when they're absent, so the
-frontend still renders a (plainer) card — nothing else breaks.
+`order_details` for a `BUY` matches `chaos-sandbox`'s `SpreadStressInputs`
+exactly: `direction` (`bullish`/`bearish`), `quantity`, a positive net
+`limit_price`, `spot_price`, and `legs` (2 entries — each with its own
+`symbol`, `option_type`, `strike`, `implied_volatility`, `days_to_expiry`,
+`bid`/`ask`, `ratio_qty`, `side`, `position_intent`). `TradeProposal.symbol`
+is the **underlying ticker** (e.g. `"AAPL"`), not an option symbol —
+`chaos-sandbox` cross-checks every leg's OCC symbol against this field.
+Both `SpreadStressInputs` and `SpreadLegInputs` use `extra="forbid"`, so no
+extra keys (`description`/`reasoning`, etc.) are added at either level.
 
 ## Reliability — never a crash, never a hallucinated number
 
@@ -177,16 +134,17 @@ frontend still renders a (plainer) card — nothing else breaks.
   bare retry (no corrective message makes sense for a transport failure),
   then `HOLD`. Verified live with a deliberately invalid API key: two real
   401s, then a clean `HOLD` - never an unhandled exception.
-- **Model picks a `contract_symbol` not in the list it was shown** (i.e.
-  invents one): falls back to `HOLD`.
-- **A contract has data chaos-sandbox's strict schema would reject** -
+- **Model picks a `spread_id` not in the list it was shown** (i.e. invents
+  one): falls back to `HOLD`.
+- **A leg has data `chaos-sandbox`'s strict schema would reject** -
   `implied_volatility: None` (confirmed live: Alpaca genuinely returns this
   for some illiquid contracts, alongside zeroed Greeks), a zero or crossed
   `ask`/`bid` - filtered out of the candidate pool entirely before the LLM
   ever sees it, not just before submission.
-- **Chain has nothing eligible** (nothing survives the filters above, or
-  nothing clears `MIN_DAYS_TO_EXPIRY`): falls back to `HOLD` before ever
-  calling the LLM.
+- **No viable spread exists** (nothing survives the filters above, no long
+  leg clears `SPREAD_MIN_DAYS_TO_EXPIRY`, or no short leg keeps the net
+  debit under `SPREAD_MAX_DEBIT_TO_WIDTH_RATIO` of the width): falls back
+  to `HOLD` before ever calling the LLM.
 - **Anything else unexpected** (e.g. malformed upstream data -
   `chain_summary` is a loose, unvalidated dict by design): `main.py`'s
   endpoint wraps the whole call in a catch-all that logs and returns
@@ -212,8 +170,8 @@ Needs `FEATHERLESS_API_KEY`/`FEATHERLESS_MODEL` in the repo-root `.env`
 (loaded via `python-dotenv` at the top of `main.py` for local runs; Docker
 gets them from `docker-compose.yml`'s `env_file` instead). Position sizing
 also needs `broker-gateway` reachable at `BROKER_GATEWAY_URL` for its
-`GET /account` call - falls back to sizing 1 contract if that fails, so
-this service still works standalone, just less precisely.
+`GET /account` call - falls back to sizing 1 spread if that fails, so this
+service still works standalone, just less precisely.
 
 ```bash
 curl http://localhost:8002/health
@@ -226,18 +184,21 @@ curl -X POST http://localhost:8002/generate-proposal \
 
 Not just unit-tested against mocks:
 
-- Fetched a real `MarketContext` from a running `broker-gateway` and got a
-  real Featherless completion back on the first attempt.
-- Fed the resulting `TradeProposal` into `chaos-sandbox`'s real
-  `OptionStressInputs.model_validate()` — accepted, zero `extra_forbidden`
-  errors — and its real stress engine, which correctly `VETO`'d an early
-  near-the-money test proposal (99.9% worst-case loss) and correctly
-  `SAFE`'d a later deep-ITM one (a real 470+-DTE ~25%-ITM AAPL call, 77%
-  survival score).
-- Ran a full `POST /runs` through `broker-gateway` with `ai-strategy` and
-  `chaos-sandbox` both actually running: `market_context` → `trade_proposal`
-  → `chaos_result` all succeed — the pipeline's first time ever reaching
-  past `trade_proposal`, and the first proposal to ever survive the stress
-  test. Stops at `risk_result`, `risk-engine`'s known, already-tracked
-  contract-mismatch gap (its author is mid-fix) — the only thing left
-  between this and a fully real, executed autonomous trade.
+- Fetched real `MarketContext`s from a running `broker-gateway` for
+  multiple tickers (AAPL, TSLA, NVDA, F, INTC) and got real Featherless
+  completions back.
+- Submitted the generated candidate spreads directly to `chaos-sandbox`'s
+  real `/stress-test` - confirmed both `SAFE` (AAPL bull call spread, 30.3%
+  worst-case loss; AAPL bear put spread, 22.4%) and `VETO` outcomes (a
+  narrower AAPL spread at 45.5%; a TSLA call spread at 40.0% - real,
+  ticker-specific IV differences, not a bug) against real, moving market
+  data - not assumed to pass.
+- Ran full `POST /runs` cycles through `broker-gateway` with `ai-strategy`
+  and `chaos-sandbox` both actually running, across five tickers:
+  `market_context` → `trade_proposal` → `chaos_result` all succeed in every
+  case. A real `INTC` run produced a genuine `HOLD` driven by the new
+  price-trend data ("negative momentum over both 5 and 20 days"); other
+  runs correctly judged neither spread had a strong enough signal. Stops at
+  `risk_result`, `risk-engine`'s known, already-tracked contract-mismatch
+  gap (its author is mid-fix) — the only thing left between this and a
+  fully real, executed autonomous spread trade.
