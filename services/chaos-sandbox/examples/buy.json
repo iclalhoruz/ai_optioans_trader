@@ -1,0 +1,22 @@
+{
+  "strategy_id": "dialectic-v1",
+  "action": "BUY",
+  "symbol": "AAPL",
+  "generated_code": "",
+  "conviction_score": 0.82,
+  "order_details": {
+    "option_symbol": "AAPL261016C00190000",
+    "option_type": "call",
+    "quantity": 1,
+    "limit_price": 5.10,
+    "spot_price": 189.50,
+    "strike": 190.00,
+    "implied_volatility": 0.27,
+    "days_to_expiry": 30,
+    "bid": 5.00,
+    "ask": 5.20,
+    "risk_free_rate": 0.04,
+    "contract_multiplier": 100,
+    "delta": 0.52
+  }
+}

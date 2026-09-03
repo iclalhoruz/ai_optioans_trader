@@ -1,0 +1,32 @@
+{
+  "is_safe": false,
+  "stress_score": 0.8891521668358654,
+  "logs": [
+    "SPREAD_SHOCK: spread widened from 0.2000 to 1.2000; call, spot=189.5000, strike=190.0000, IV=27.00%, DTE=30, rate=4.00%, spread=1.2000; theoretical price=$5.9106, estimated exit price=$5.3106; quantity=1, multiplier=100, entry=$510.00, exit=$531.06, PnL=$21.06; estimated loss 0.0% ($0.00)",
+    "IV_CRUSH: IV reduced from 27.0% to 5.4%; call, spot=189.5000, strike=190.0000, IV=5.40%, DTE=30, rate=4.00%, spread=0.2000; theoretical price=$1.2328, estimated exit price=$1.2328; quantity=1, multiplier=100, entry=$510.00, exit=$123.28, PnL=$-386.72; estimated loss 75.8% ($386.72)",
+    "ADVERSE_MOVE: spot moved from 189.5000 to 170.5500; call, spot=170.5500, strike=190.0000, IV=27.00%, DTE=30, rate=4.00%, spread=0.2000; theoretical price=$0.5653, estimated exit price=$0.5653; quantity=1, multiplier=100, entry=$510.00, exit=$56.53, PnL=$-453.47; estimated loss 88.9% ($453.47)",
+    "VETO: worst-case loss 88.9% exceeds the configured 35.0% limit"
+  ],
+  "refined_proposal": {
+    "strategy_id": "dialectic-v1",
+    "action": "BUY",
+    "symbol": "AAPL",
+    "generated_code": "",
+    "conviction_score": 0.82,
+    "order_details": {
+      "option_symbol": "AAPL261016C00190000",
+      "option_type": "call",
+      "quantity": 1,
+      "limit_price": 5.1,
+      "spot_price": 189.5,
+      "strike": 190.0,
+      "implied_volatility": 0.27,
+      "days_to_expiry": 30,
+      "bid": 5.0,
+      "ask": 5.2,
+      "risk_free_rate": 0.04,
+      "contract_multiplier": 100,
+      "delta": 0.52
+    }
+  }
+}

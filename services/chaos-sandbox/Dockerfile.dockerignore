@@ -1,0 +1,8 @@
+**
+!contracts/
+!contracts/*.py
+!services/
+!services/chaos-sandbox/
+!services/chaos-sandbox/requirements.txt
+!services/chaos-sandbox/chaos_sandbox/
+!services/chaos-sandbox/chaos_sandbox/*.py
