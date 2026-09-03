@@ -40,6 +40,28 @@ services:
     networks:
       - trader-network
 
+  # The autonomous piece - loops over WATCHLIST_TICKERS and triggers a run
+  # every SCHEDULER_INTERVAL_MINUTES via broker-gateway's POST /runs.
+  # No exposed port, not an HTTP service. restart: unless-stopped so it
+  # keeps running unattended - every hour it's up before the deadline is
+  # real trading history for the P&L judging criterion.
+  scheduler:
+    build:
+      context: .
+      dockerfile: workflow/Dockerfile
+    container_name: aegis-scheduler
+    depends_on:
+      - broker-gateway
+    env_file:
+      - .env
+    environment:
+      # Override .env's localhost default - inside this network the
+      # service name is the hostname, not localhost.
+      BROKER_GATEWAY_URL: http://broker-gateway:8001
+    networks:
+      - trader-network
+    restart: unless-stopped
+
   ai-strategy:
     build:
       context: .

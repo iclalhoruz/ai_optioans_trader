@@ -263,12 +263,33 @@ class PipelineOrchestrator:
     async def _persist(self, state: PipelineState) -> None:
         key = f"pipeline:run:{state.run_id}"
         await self._redis.set(key, json.dumps(state.to_dict()), ex=self.settings.redis_state_ttl_seconds)
+        # Sorted set keyed by last-persisted time - re-persisting the same
+        # run_id (happens once per step) just bumps its score instead of
+        # creating duplicate index entries, so "recent runs" stays correct
+        # without any special-casing at the call site.
+        await self._redis.zadd("pipeline:runs:index", {state.run_id: datetime.now(timezone.utc).timestamp()})
 
     async def _load(self, run_id: str) -> PipelineState:
         raw = await self._redis.get(f"pipeline:run:{run_id}")
         if raw is None:
             raise KeyError(f"no persisted state for run_id={run_id}")
         return PipelineState.from_dict(json.loads(raw))
+
+    async def get_state(self, run_id: str) -> PipelineState:
+        """Public read - for an HTTP layer (broker-gateway) to poll a run's state."""
+        return await self._load(run_id)
+
+    async def list_recent_run_ids(self, limit: int = 20) -> list[str]:
+        return await self._redis.zrevrange("pipeline:runs:index", 0, limit - 1)
+
+    async def forget_run(self, run_id: str) -> None:
+        """Drop a run_id from the recent-runs index. Individual run state
+        expires from Redis after redis_state_ttl_seconds (24h default), but
+        nothing was pruning the index itself - with the scheduler generating
+        a run every few minutes for days, list_recent_run_ids() would start
+        returning ids whose state is already gone. Callers should call this
+        when get_state() raises KeyError for an id pulled from the index."""
+        await self._redis.zrem("pipeline:runs:index", run_id)
 
     async def _compensate(self, completed_steps: list[StepConfig], state: PipelineState) -> None:
         for step in reversed(completed_steps):
@@ -288,7 +309,22 @@ class PipelineOrchestrator:
         state.set_result(step.name, step.response_model.model_validate(raw))
 
     async def run(self, ticker: str) -> PipelineState:
+        """Blocks until the run reaches a terminal (or HITL-paused) state -
+        what test_pipeline.py and the CLI entrypoint below use."""
         state = PipelineState(run_id=str(uuid.uuid4()), ticker=ticker)
+        return await self._execute(state)
+
+    async def start(self, ticker: str) -> str:
+        """Non-blocking version for an HTTP caller (broker-gateway's POST
+        /runs): persists the run immediately so a GET right after never
+        404s, then executes it as a background task instead of holding the
+        HTTP request open for however long the whole pipeline takes."""
+        state = PipelineState(run_id=str(uuid.uuid4()), ticker=ticker)
+        await self._persist(state)
+        asyncio.create_task(self._execute(state))
+        return state.run_id
+
+    async def _execute(self, state: PipelineState) -> PipelineState:
         state.status = PipelineStatus.RUNNING
         await self._persist(state)
 
