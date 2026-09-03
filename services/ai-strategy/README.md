@@ -66,13 +66,20 @@ exactly this reason. Adding spread support here would be pointless without
 
 `llm.py`'s `_select_contracts_for_prompt`:
 
-1. Filters `MarketContext.chain_summary.contracts` to ones with a live
-   bid/ask and `days_to_expiry >= MIN_DAYS_TO_EXPIRY` (180 by default).
+1. Filters `MarketContext.chain_summary.contracts` to ones with a live,
+   non-crossed bid/ask, a real (non-`None`) `implied_volatility`, and
+   `days_to_expiry >= MIN_DAYS_TO_EXPIRY` (180 by default).
 2. Groups by option type and, within each, keeps **one contract per
-   distinct strike** — whichever expiration is longest-dated for that
-   strike (more time value cushion, more margin under the stress test).
-   Without this, a single strike listed across many expirations (common in
-   real chains) would crowd out genuinely different strikes.
+   distinct strike** — whichever expiration is closest to
+   `TARGET_DAYS_TO_EXPIRY` (365 by default). An earlier version picked the
+   *longest*-dated expiration per strike for maximum stress-test margin,
+   but that pushed real selections out to 2027-2028 - the extra time value
+   made even a single contract too expensive for any sane risk budget
+   (verified live, see "Position sizing" below). 365 days still clears
+   chaos-sandbox with real margin (~30% loss vs. its 35% veto) without that
+   extra cost. Without this per-strike reduction at all, a single strike
+   listed across many expirations (common in real chains) would crowd out
+   genuinely different strikes.
 3. Ranks each group by closeness to `TARGET_ITM_PCT` (25% by default) —
    `spot * (1 - 0.25)` for calls, `spot * (1 + 0.25)` for puts.
 4. Takes half of `CONTRACTS_IN_PROMPT` from calls and half from puts, so
@@ -83,6 +90,47 @@ This depends on `broker-gateway` actually having deep-ITM contracts to
 offer in the first place — its `get_market_context` fetches a second,
 targeted strike band (60%–140% of spot, filtered server-side to 180+ days
 out) specifically for this; see `services/broker-gateway/README.md`.
+
+## Price trend — real evidence for the model's directional call
+
+Earlier versions of this service showed the model only a single
+point-in-time snapshot (spot price, IV, the candidate contracts) - no
+basis at all to form a genuine directional (bullish/bearish) view, just a
+plausible-sounding guess. `broker-gateway` now also fetches
+`chain_summary.price_trend` (recent % change over a few windows, distance
+from the recent high/low, realized volatility - all computed in code, not
+handed to the model as raw bars) and it's included in the prompt. Still no
+guarantee of real predictive edge, but it's the difference between
+reasoning over real, if modest, momentum evidence and reasoning over
+nothing at all.
+
+## Position sizing — not always 1 contract anymore
+
+`quantity` used to be hardcoded to `1` regardless of conviction or
+portfolio size. `_size_quantity` now computes a real number:
+`portfolio_value * TARGET_ALLOCATION_PCT * conviction_score`, divided by
+the contract's cost (`ask * 100`), capped at `MAX_CONTRACTS_PER_TRADE` (5
+default). `portfolio_value` comes from a live call to `broker-gateway`'s
+`GET /account` right before sizing (falls back to a conservative 1
+contract if that call fails - a portfolio-value hiccup shouldn't block a
+trade the model already decided on).
+
+**If even 1 contract costs more than the computed budget, the proposal
+degrades to `HOLD`** with a clear reason - rather than either forcing an
+oversized position or crashing. This is common, not a bug: verified live
+with the real numbers that for a $330 stock (an AAPL-priced ticker) at
+25% ITM and 365 days out, a single contract can cost upwards of $10,000 -
+there is **no** combination of ITM depth and expiry for a stock in that
+price range that clears both chaos-sandbox's 35% stress-test threshold
+*and* risk-engine's 5% `MAX_ALLOCATION_PCT` cap at once (checked
+exhaustively across ITM% × DTE, zero combinations satisfy both). This is a
+real, structural property of single-leg long options on higher-priced
+underlyings, not a tuning bug - a defined-risk spread would cost only the
+net debit paid (much less), which is the actual fix, contingent on
+chaos-sandbox modeling multi-leg risk (see "Does this support spreads?"
+below). Until then, expect `HOLD` to be a common, correct outcome for
+higher-priced tickers - the system staying honest about what it can safely
+afford is the point, not a failure.
 
 ## What the model actually decides — and what it doesn't
 
@@ -162,7 +210,10 @@ PYTHONPATH="$(pwd):$(pwd)/services/ai-strategy" \
 
 Needs `FEATHERLESS_API_KEY`/`FEATHERLESS_MODEL` in the repo-root `.env`
 (loaded via `python-dotenv` at the top of `main.py` for local runs; Docker
-gets them from `docker-compose.yml`'s `env_file` instead).
+gets them from `docker-compose.yml`'s `env_file` instead). Position sizing
+also needs `broker-gateway` reachable at `BROKER_GATEWAY_URL` for its
+`GET /account` call - falls back to sizing 1 contract if that fails, so
+this service still works standalone, just less precisely.
 
 ```bash
 curl http://localhost:8002/health

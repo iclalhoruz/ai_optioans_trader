@@ -13,6 +13,7 @@ import logging
 import uuid
 from typing import Literal, Optional
 
+import httpx
 from openai import AsyncOpenAI, OpenAIError
 from pydantic import BaseModel, Field, ValidationError
 
@@ -35,6 +36,12 @@ out - this system's risk gate stress-tests every proposal against a sharp advers
 and only contracts that behave close to owning the underlying itself (rather than a
 highly leveraged bet) can realistically survive that test. Pick the direction and
 contract, don't second-guess why every option offered is deep ITM.
+
+You're also given recent price trend data for the underlying (percent change over the
+last 5 and 20 trading days, position relative to the recent high/low, and realized
+volatility). Use it as real evidence for your directional view instead of guessing -
+e.g. a stock making new highs with positive short-term momentum is a different picture
+than one near its recent low, even before you look at the options themselves.
 
 Respond with a single JSON object and nothing else, matching exactly this shape:
 {
@@ -67,16 +74,20 @@ def _target_strike(spot_price: float, option_type: str, target_itm_pct: float) -
     return spot_price * (1 - target_itm_pct) if option_type == "call" else spot_price * (1 + target_itm_pct)
 
 
-def _best_per_strike(contracts: list[dict]) -> list[dict]:
+def _best_per_strike(contracts: list[dict], target_days_to_expiry: int) -> list[dict]:
     """One contract per distinct strike, keeping whichever expiration is
-    longest-dated - more time value cushion means more margin under
-    chaos-sandbox's stress test, not just barely clearing it. Without this,
-    a single strike listed across many expirations (common for real chains)
-    would crowd out genuinely different strikes from the ranked result."""
+    closest to target_days_to_expiry - far enough out for real margin under
+    chaos-sandbox's stress test, without going so far out that the premium
+    (and therefore the cost of even 1 contract) balloons unaffordably.
+    Without this per-strike reduction at all, a single strike listed across
+    many expirations (common for real chains) would crowd out genuinely
+    different strikes from the ranked result."""
     best: dict[float, dict] = {}
     for c in contracts:
         current = best.get(c["strike"])
-        if current is None or c["days_to_expiry"] > current["days_to_expiry"]:
+        if current is None or abs(c["days_to_expiry"] - target_days_to_expiry) < abs(
+            current["days_to_expiry"] - target_days_to_expiry
+        ):
             best[c["strike"]] = c
     return list(best.values())
 
@@ -112,8 +123,8 @@ def _select_contracts_for_prompt(context: MarketContext, settings: Settings) -> 
         return []
 
     half = max(1, settings.contracts_in_prompt // 2)
-    calls = _best_per_strike([c for c in eligible if c["option_type"] == "call"])
-    puts = _best_per_strike([c for c in eligible if c["option_type"] == "put"])
+    calls = _best_per_strike([c for c in eligible if c["option_type"] == "call"], settings.target_days_to_expiry)
+    puts = _best_per_strike([c for c in eligible if c["option_type"] == "put"], settings.target_days_to_expiry)
     calls.sort(key=lambda c: abs(c["strike"] - _target_strike(context.spot_price, "call", settings.target_itm_pct)))
     puts.sort(key=lambda c: abs(c["strike"] - _target_strike(context.spot_price, "put", settings.target_itm_pct)))
     return calls[:half] + puts[:half]
@@ -137,6 +148,7 @@ def _build_user_message(context: MarketContext, contracts: list[dict]) -> str:
         "ticker": context.ticker,
         "spot_price": context.spot_price,
         "implied_volatility": context.implied_volatility,
+        "price_trend": context.chain_summary.get("price_trend") or {},
         "contracts": simplified,
     }
     return json.dumps(payload, indent=2)
@@ -153,6 +165,17 @@ def _extract_json(content: Optional[str]) -> str:
         if text.startswith("json"):
             text = text[4:]
     return text.strip()
+
+
+def _size_quantity(portfolio_value: float, conviction_score: float, ask_price: float, settings: Settings) -> int:
+    """How many contracts to buy - scales with both the model's conviction
+    and the real portfolio value instead of always proposing exactly 1
+    regardless of either. Deliberately conservative (TARGET_ALLOCATION_PCT
+    default 2%, well under risk-engine's 5% MAX_ALLOCATION_PCT cap) so
+    sizing itself isn't why a reasonable proposal gets vetoed downstream."""
+    budget = portfolio_value * settings.target_allocation_pct * conviction_score
+    quantity = int(budget // (ask_price * 100))
+    return min(quantity, settings.max_contracts_per_trade)
 
 
 def _hold_proposal(ticker: str, reason: str) -> TradeProposal:
@@ -172,6 +195,19 @@ class FeatherlessStrategyEngine(BaseStrategyEngine):
         self._client = AsyncOpenAI(
             api_key=self.settings.featherless_api_key, base_url=self.settings.featherless_base_url
         )
+        self._http = httpx.AsyncClient()
+
+    async def _fetch_portfolio_value(self) -> Optional[float]:
+        try:
+            response = await self._http.get(f"{self.settings.broker_gateway_url}/account", timeout=10.0)
+            response.raise_for_status()
+            return float(response.json()["portfolio_value"])
+        except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
+            # broker-gateway being briefly unreachable shouldn't block a
+            # trade the model already decided on - fall back to sizing
+            # conservatively (1 contract) rather than aborting the proposal.
+            logger.warning("couldn't fetch portfolio_value for sizing, defaulting to 1 contract: %s", exc)
+            return None
 
     async def _ask_llm(self, messages: list[dict]) -> _LLMDecision:
         response = await self._client.chat.completions.create(
@@ -232,6 +268,19 @@ class FeatherlessStrategyEngine(BaseStrategyEngine):
                 market_context.ticker, f"model picked an unlisted contract ({decision.contract_symbol})"
             )
 
+        portfolio_value = await self._fetch_portfolio_value()
+        quantity = (
+            _size_quantity(portfolio_value, decision.conviction_score, contract["ask"], self.settings)
+            if portfolio_value is not None
+            else 1
+        )
+        if quantity < 1:
+            return _hold_proposal(
+                market_context.ticker,
+                f"{contract['symbol']} too expensive for current risk budget "
+                f"(portfolio_value=${portfolio_value:,.0f}, conviction={decision.conviction_score:.2f})",
+            )
+
         return TradeProposal(
             strategy_id=str(uuid.uuid4()),
             action="BUY",
@@ -243,7 +292,7 @@ class FeatherlessStrategyEngine(BaseStrategyEngine):
             # with its extra="forbid" schema (verified live, see CLAUDE.md).
             order_details={
                 "option_type": contract["option_type"],
-                "quantity": 1,
+                "quantity": quantity,
                 "limit_price": contract["ask"],
                 "spot_price": market_context.spot_price,
                 "strike": contract["strike"],

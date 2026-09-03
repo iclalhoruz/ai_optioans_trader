@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import subprocess
 from datetime import date, datetime, timedelta, timezone
@@ -30,6 +31,14 @@ from contracts.schemas import ExecutionResponse, MarketContext, TradeProposal
 # slice of chain_summary - used for MarketContext.implied_volatility and
 # as general market context.
 STRIKE_WINDOW = 10.0
+
+# ai-strategy's LLM only ever saw a single snapshot in time before this -
+# no basis to form a directional view at all. This many trading days of
+# daily bars get fetched and reduced to a few real trend numbers (not
+# handed to the model raw - LLMs are unreliable at doing arithmetic over a
+# table of rows, same reasoning as never trusting the model's own pricing
+# math elsewhere in this system).
+PRICE_TREND_LOOKBACK_DAYS = 40
 
 # A single long option is extremely leveraged - checked live with the real
 # Black-Scholes math in chaos_sandbox/pricing.py: even a deep (40%) ITM,
@@ -132,9 +141,51 @@ class AlpacaBrokerGateway(BaseBrokerGateway):
             if not page_token:
                 return snapshots
 
+    async def _fetch_price_trend(self, ticker: str) -> dict:
+        """Reduces PRICE_TREND_LOOKBACK_DAYS of daily bars to a handful of
+        real numbers - percent change over a few windows, distance from the
+        recent high/low, and realized volatility (comparable to the
+        chain's own implied_volatility) - instead of dumping raw bars into
+        the LLM prompt and hoping it computes trend correctly itself."""
+        start = (date.today() - timedelta(days=PRICE_TREND_LOOKBACK_DAYS)).isoformat()
+        result = await self._cli(
+            "data", "bars", "--symbol", ticker, "--start", start, "--timeframe", "1Day", "--limit", "1000"
+        )
+        bars = result.get("bars", [])
+        if len(bars) < 2:
+            return {}
+
+        closes = [bar["c"] for bar in bars]
+        last = closes[-1]
+
+        def _pct_change(days_back: int) -> float | None:
+            if len(closes) <= days_back:
+                return None
+            return (last - closes[-1 - days_back]) / closes[-1 - days_back]
+
+        high = max(bar["h"] for bar in bars)
+        low = min(bar["l"] for bar in bars)
+
+        daily_returns = [math.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))]
+        mean_return = sum(daily_returns) / len(daily_returns)
+        variance = sum((r - mean_return) ** 2 for r in daily_returns) / len(daily_returns)
+        realized_volatility = math.sqrt(variance) * math.sqrt(252)  # annualized, same convention as IV
+
+        return {
+            "lookback_days": len(bars),
+            "change_5d_pct": _pct_change(5),
+            "change_20d_pct": _pct_change(20),
+            "change_period_pct": (last - closes[0]) / closes[0],
+            "pct_from_high": (last - high) / high,
+            "pct_from_low": (last - low) / low,
+            "realized_volatility_annualized": realized_volatility,
+        }
+
     async def get_market_context(self, ticker: str) -> MarketContext:
         trade = await self._cli("data", "latest-trade", "--symbol", ticker)
         spot_price = float(trade["trade"]["p"])
+
+        price_trend = await self._fetch_price_trend(ticker)
 
         near_the_money = await self._fetch_option_chain(
             ticker, spot_price - STRIKE_WINDOW, spot_price + STRIKE_WINDOW
@@ -180,7 +231,7 @@ class AlpacaBrokerGateway(BaseBrokerGateway):
             ticker=ticker,
             spot_price=spot_price,
             implied_volatility=implied_volatility,
-            chain_summary={"contracts": contracts},
+            chain_summary={"contracts": contracts, "price_trend": price_trend},
             timestamp=datetime.now(timezone.utc).isoformat(),
         )
 
@@ -257,3 +308,13 @@ class AlpacaBrokerGateway(BaseBrokerGateway):
 
     async def get_clock(self) -> dict:
         return await self._cli("clock")
+
+    async def list_positions(self) -> list[dict]:
+        # `alpaca position list` returns a JSON array directly (confirmed
+        # live), not wrapped in an object - _cli()'s json.loads handles
+        # either shape, this method is just the one that actually gets one.
+        result = await self._cli("position", "list")
+        return result if isinstance(result, list) else []
+
+    async def close_position(self, symbol: str) -> dict:
+        return await self._cli("position", "close", "--symbol-or-asset-id", symbol)

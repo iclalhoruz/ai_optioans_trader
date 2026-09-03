@@ -55,12 +55,29 @@ async def trigger_run(client: httpx.AsyncClient, ticker: str) -> None:
         logger.error("couldn't start a run for %s: %s", ticker, exc)
 
 
+async def manage_positions(client: httpx.AsyncClient) -> None:
+    # The counterpart to trigger_run(): checks every open position against
+    # broker-gateway's deterministic take-profit/stop-loss/expiring-soon
+    # rules (services/broker-gateway/position_manager.py) and closes any
+    # that trigger. Without this the autonomous loop only ever opens new
+    # positions and never manages the ones it already has.
+    try:
+        response = await client.post(f"{BROKER_GATEWAY_URL}/positions/manage", timeout=30.0)
+        response.raise_for_status()
+        closed = [r for r in response.json() if r.get("closed")]
+        if closed:
+            logger.info("closed %d position(s): %s", len(closed), closed)
+    except httpx.HTTPError as exc:
+        logger.error("couldn't check/manage positions: %s", exc)
+
+
 async def run_forever() -> None:
     logger.info("watchlist=%s interval=%.0fs broker_gateway=%s", WATCHLIST, INTERVAL_SECONDS, BROKER_GATEWAY_URL)
 
     async with httpx.AsyncClient() as client:
         while True:
             if await is_market_open(client):
+                await manage_positions(client)
                 for ticker in WATCHLIST:
                     await trigger_run(client, ticker)
             else:

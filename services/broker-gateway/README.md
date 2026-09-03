@@ -21,6 +21,10 @@ instead of only from the CLI entrypoint in `workflow/pipeline.py`.
 | `GET /runs/active` | The most recently *started* run's full detail (not necessarily still running — matches the frontend's own semantics for "the run to show on Dashboard"). |
 | `GET /runs/recent` | Last 20 runs as summaries. Self-heals: a stale id (state expired past its 24h Redis TTL, index entry left behind) is skipped and pruned instead of 500ing. |
 | `GET /runs/{run_id}` | One run's full detail. |
+| `GET /positions` | Real open positions (`alpaca position list`). |
+| `POST /positions/manage` | Checks every open position against deterministic exit rules (take-profit/stop-loss/expiring-soon) and closes any that trigger. `workflow/scheduler.py` calls this once per autonomous cycle. |
+| `GET /trades` | Recent trade log entries (opens and closes) — see "Trade log & P&L" below. |
+| `GET /pnl` | Aggregated realized P&L across the trade log. |
 
 `runs.py` also translates `PipelineState` (snake_case, backend-internal)
 into the exact camelCase shape `frontend/src/types/domain.ts` expects
@@ -114,6 +118,60 @@ one `chain_summary.contracts` list:
 
 The two windows overlap for long-dated contracts already near the money -
 harmless, the merge just re-writes identical data for those symbols.
+
+## Price trend — `chain_summary.price_trend`
+
+`get_market_context` also fetches `PRICE_TREND_LOOKBACK_DAYS` (40) of daily
+bars (`alpaca data bars`) and reduces them to a few real numbers -
+`change_5d_pct`, `change_20d_pct`, `change_period_pct`, `pct_from_high`,
+`pct_from_low`, `realized_volatility_annualized` - instead of handing
+`ai-strategy` raw bars to compute trend from itself. Before this,
+`ai-strategy`'s model only ever saw a single point-in-time snapshot with no
+basis at all to form a directional view; this gives it real, if modest,
+momentum/trend evidence instead. Computed in code, not by the model, for
+the same reason every other number in this system is - LLMs are unreliable
+at doing precise arithmetic over a table of rows.
+
+## Position management — exit rules, not just entries
+
+`services/broker-gateway/position_manager.py` is the counterpart to
+`ai-strategy`'s entry decision: without it, a filled position just sits
+held until expiration regardless of P&L, which isn't risk management, it's
+"buy and forget." `POST /positions/manage` checks every open position
+against three deterministic (no LLM) rules and closes any that trigger:
+
+- **Take-profit**: `unrealized_plpc >= TAKE_PROFIT_PCT` (25% default)
+- **Stop-loss**: `unrealized_plpc <= -STOP_LOSS_PCT` (20% default)
+- **Expiring soon**: `days_to_expiry <= MIN_DAYS_BEFORE_CLOSE` (14 default) -
+  parsed from the position's own OCC symbol via `_parse_occ_symbol`, no
+  extra API call needed
+
+Deliberately **not** wired into `workflow/pipeline.py`'s entry pipeline
+(market context → proposal → stress test → risk gate → execute) - closing
+an existing position is risk-*reducing*, not a new bet, so it doesn't need
+a fresh proposal/stress-test/veto cycle the way opening one does.
+`workflow/scheduler.py` calls this once per autonomous cycle, right
+alongside triggering new-entry runs.
+
+**Verified live**: manually triggered this against two real open positions
+(leftover legs from the earlier multi-leg test) - one hit take-profit and
+closed correctly; the other (at -57%, well past stop-loss) initially failed
+to close in the same call (a transient rejection, likely from closing
+another leg of the same former multi-leg position moments earlier) but
+closed cleanly on retry. That failure mode is why `manage_positions()`
+reports `closed: false` with the error for anything that doesn't actually
+close, instead of only ever reporting successes.
+
+## Trade log & P&L — `services/broker-gateway/trade_log.py`
+
+A Redis-backed record of what this system actually did - not a backtest,
+a real forward trade log. `POST /execute-order` records an "open" entry
+for any real fill; `POST /positions/manage` records a "close" entry (with
+realized P&L) for anything it closes. `GET /pnl` aggregates the closed
+entries into `totalRealizedPnl`/`closedTradeCount`/`winCount`/
+`winRatePct`. This is what makes "is the autonomous system actually making
+money" answerable with real numbers instead of "the pipeline ran
+successfully" - those are different claims.
 
 ## Order execution — `order_details` conventions
 

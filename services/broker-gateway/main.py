@@ -25,7 +25,9 @@ from fastapi.responses import JSONResponse  # noqa: E402
 
 from alpaca_client import AlpacaBrokerGateway, AlpacaCLIError  # noqa: E402
 from contracts.schemas import ExecutionResponse, MarketContext, TradeProposal  # noqa: E402
+from position_manager import manage_positions  # noqa: E402
 from runs import router as runs_router  # noqa: E402
+from trade_log import TradeLog  # noqa: E402
 
 app = FastAPI(title="broker-gateway")
 
@@ -43,6 +45,7 @@ app.add_middleware(
 app.include_router(runs_router)
 
 gateway = AlpacaBrokerGateway()
+trade_log = TradeLog()
 
 
 @app.exception_handler(AlpacaCLIError)
@@ -61,7 +64,41 @@ async def get_market_context(ticker: str) -> MarketContext:
 
 @app.post("/execute-order", response_model=ExecutionResponse)
 async def execute_order(proposal: TradeProposal) -> ExecutionResponse:
-    return await gateway.execute_order(proposal)
+    response = await gateway.execute_order(proposal)
+    if proposal.action != "HOLD" and response.status != "NO_ACTION":
+        # Records what we intended to pay (order_details' limit_price) at
+        # submission time - execute_order returns right after submission,
+        # often before a fill is confirmed, so a live "filled_avg_price" of
+        # 0.0 isn't yet meaningful to log as the open price.
+        details = proposal.order_details
+        qty = float(details.get("quantity", details.get("qty", 1)))
+        price = float(details.get("limit_price", response.filled_avg_price))
+        await trade_log.record_open(proposal.symbol, qty, price, response.order_id)
+    return response
+
+
+@app.get("/positions")
+async def list_positions() -> list[dict]:
+    return await gateway.list_positions()
+
+
+@app.post("/positions/manage")
+async def manage_positions_endpoint() -> list[dict]:
+    # workflow/scheduler.py calls this once per autonomous cycle alongside
+    # triggering new-entry runs - deterministic take-profit/stop-loss/
+    # expiring-soon rules, no LLM, no risk-engine/chaos-sandbox involved
+    # (closing an existing position is risk-reducing, not a new bet).
+    return await manage_positions(gateway, trade_log)
+
+
+@app.get("/trades")
+async def list_trades(limit: int = 100) -> list[dict]:
+    return await trade_log.recent(limit)
+
+
+@app.get("/pnl")
+async def get_pnl() -> dict:
+    return await trade_log.pnl_summary()
 
 
 @app.get("/account")
