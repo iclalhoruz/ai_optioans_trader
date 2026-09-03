@@ -28,8 +28,9 @@ async def evaluate_trade(proposal: TradeProposal):
         check_delta_limit(proposal.trade_delta)
     ]
     
-    for passed, reasons in rules_to_check:
-        if not passed:
-            return EvaluationResponse(approved=False, reasons=reasons)
+    failed_reasons = [reason for passed, reason in rules_to_check if not passed]
+    
+    if failed_reasons:
+        return EvaluationResponse(approved=False, reasons=failed_reasons)
             
-    return EvaluationResponse(approved=True)
+    return EvaluationResponse(approved=True, reasons=[])

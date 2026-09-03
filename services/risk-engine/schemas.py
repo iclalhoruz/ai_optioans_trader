@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import List
 
 class ChaosResult(BaseModel):
     is_safe: bool
@@ -14,4 +14,4 @@ class TradeProposal(BaseModel):
 
 class EvaluationResponse(BaseModel):
     approved: bool
-    reasons: Optional[List[str]] = []
+    reasons: List[str] = []
