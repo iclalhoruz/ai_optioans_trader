@@ -28,7 +28,16 @@ class Settings(BaseSettings):
     # ~270 days out, costing ~$2,000-3,000/contract with 20-30% real
     # stress-test margin (vs. a single-leg deep-ITM equivalent costing
     # $10,000+).
-    spread_long_itm_pct: float = 0.15
+    # Bumped 0.15 -> 0.25 (2026-09-04): the 0.15 default's "20-30% real
+    # stress-test margin" was measured on AAPL - live-tested against F the
+    # same day and it came back at 48% (a real fail, not noise), so 15% ITM
+    # isn't deep enough across the whole watchlist's mix of IV profiles.
+    # Deeper ITM means a higher-delta long leg that tracks the underlying's
+    # own percentage move more closely under chaos-sandbox's adverse-move
+    # shock, which is what actually lowers the stress score - not spread
+    # width or debit ratio, which mostly affect cost and reward, not
+    # survivability.
+    spread_long_itm_pct: float = 0.25
     spread_width_pct: float = 0.10
     spread_target_days_to_expiry: int = 270
     spread_min_days_to_expiry: int = 90

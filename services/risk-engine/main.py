@@ -37,9 +37,24 @@ async def get_portfolio_value() -> float:
 
 @app.post("/validate-risk", response_model=RiskResult)
 async def validate_risk(chaos_result: ChaosTestResult):
-    portfolio_value = await get_portfolio_value()
     proposal: TradeProposal = chaos_result.refined_proposal
-    
+
+    # A HOLD proposes no trade at all - there's no position size, no delta,
+    # and ai-strategy's conviction_score for a HOLD reflects how sure the
+    # model is that *nothing* is worth doing, not confidence in a trade, so
+    # it was never meant to clear the same 0.4 floor a real BUY needs to.
+    # Before this check existed, every HOLD got hard-vetoed on conviction
+    # (score was also being reported as a hardcoded 0.0 on the ai-strategy
+    # side, compounding it) and showed up as a red "Vetoed" trade block in
+    # the UI even though nothing was ever actually blocked - chaos-sandbox
+    # and broker-gateway's execute_order already treat HOLD as a trivial
+    # no-op for exactly this reason, this brings risk-engine in line with
+    # both.
+    if proposal.action == "HOLD":
+        return RiskResult(is_approved=True, veto_reason=None, final_proposal=proposal)
+
+    portfolio_value = await get_portfolio_value()
+
     # order_details never actually has an "amount" key - ai-strategy's real
     # proposals carry quantity/limit_price/contract_multiplier instead
     # (same shape workflow/pipeline.py's own _notional_value() reads), so

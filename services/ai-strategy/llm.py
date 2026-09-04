@@ -42,6 +42,14 @@ bet, or neither.
 You're also given recent price trend data for the underlying (percent change over the
 last 5 and 20 trading days, position relative to the recent high/low, and realized
 volatility). Use it as real evidence for your directional view instead of guessing.
+Don't hold out for an unusually strong or obvious trend before acting - a modest but
+real lean (a consistent 5-day and 20-day move in the same direction, or sitting clearly
+toward one end of the recent high/low range) is real evidence and is enough to act on.
+You are not the only safeguard here: a deterministic risk engine independently checks
+position size, portfolio delta, and a worst-case stress test on every proposal you make
+and can veto it regardless of your conviction, so lean toward giving your honest
+directional read rather than defaulting to "HOLD" whenever the picture isn't perfectly
+clean.
 
 Respond with a single JSON object and nothing else, matching exactly this shape:
 {
@@ -213,13 +221,20 @@ def _size_quantity(portfolio_value: float, conviction_score: float, cost_per_con
     return min(quantity, settings.max_contracts_per_trade)
 
 
-def _hold_proposal(ticker: str, reason: str) -> TradeProposal:
+def _hold_proposal(ticker: str, reason: str, conviction_score: float = 0.0) -> TradeProposal:
+    """conviction_score defaults to 0.0 for the cases where no real model
+    decision exists to report (no candidates, LLM call/parse failed twice,
+    an invalid spread_id) - but callers that DO have a real _LLMDecision
+    should pass its actual conviction_score through instead of discarding
+    it. risk-engine never gates on this for a HOLD (nothing to veto), so
+    this number is purely for the dashboard's "AI Reasoning" panel to show
+    the model's genuine confidence in its own "nothing to do" call."""
     return TradeProposal(
         strategy_id=str(uuid.uuid4()),
         action="HOLD",
         symbol=ticker,
         generated_code="",
-        conviction_score=0.0,
+        conviction_score=conviction_score,
         order_details={"reasoning": reason},
     )
 
@@ -309,7 +324,7 @@ class FeatherlessStrategyEngine(BaseStrategyEngine):
             )
 
         if decision.action == "HOLD" or decision.spread_id is None:
-            return _hold_proposal(market_context.ticker, decision.reasoning)
+            return _hold_proposal(market_context.ticker, decision.reasoning, decision.conviction_score)
 
         candidate = next((c for c in candidates if c["spread_id"] == decision.spread_id), None)
         if candidate is None:
@@ -327,6 +342,7 @@ class FeatherlessStrategyEngine(BaseStrategyEngine):
                 market_context.ticker,
                 f"{candidate['spread_id']} too expensive for current risk budget "
                 f"(portfolio_value=${portfolio_value:,.0f}, conviction={decision.conviction_score:.2f})",
+                decision.conviction_score,
             )
 
         return TradeProposal(

@@ -12,12 +12,23 @@ real URL and this same orchestrator hits it over the network instead.
 
 Needs a real Redis reachable at REDIS_URL (default localhost:6379) -
 `docker compose up -d redis` first.
+
+Writes to db 1 on that Redis instance, never db 0 - PipelineSettings()'s
+default redis_url (and .env's) points at db 0, the same keyspace the real
+running stack persists real runs to. This test used to connect there
+directly, which meant every run of this file left its 3 fixed mock
+proposals (AAPL/TSLA/NVDA, strategy_id "mock-dialectic-v1") sitting in
+`pipeline:runs:index` indistinguishable from real trade history in the
+frontend - confirmed live: 27 of them had accumulated there from earlier
+sessions and were mistaken for real executed trades before being found and
+cleaned up (see CLAUDE.md, 2026-09-04).
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from typing import Awaitable, Callable
@@ -26,6 +37,8 @@ import httpx
 import redis.asyncio as redis
 
 from workflow.pipeline import PipelineOrchestrator, PipelineSettings, PipelineStatus
+
+TEST_REDIS_URL = os.environ.get("TEST_REDIS_URL", "redis://localhost:6379/1")
 
 
 def _now() -> str:
@@ -169,12 +182,12 @@ async def _run_check(name: str, coro: Awaitable[None]) -> bool:
 
 async def main() -> int:
     settings = PipelineSettings()
-    redis_client = redis.from_url(settings.redis_url, decode_responses=True)
+    redis_client = redis.from_url(TEST_REDIS_URL, decode_responses=True)
 
     try:
         await redis_client.ping()
     except Exception as exc:
-        print(f"Cannot reach Redis at {settings.redis_url}: {exc}")
+        print(f"Cannot reach Redis at {TEST_REDIS_URL}: {exc}")
         print("Start it with: docker compose up -d redis")
         return 1
 
