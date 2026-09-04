@@ -7,13 +7,12 @@ WORKDIR /app
 COPY services/risk-engine/requirements.txt ./services/risk-engine/
 RUN pip install --no-cache-dir -r services/risk-engine/requirements.txt
 
-# Copying the actual application code (rules.py, schemas.py, main.py)
+# Copying the actual application code and shared contracts directory
 COPY services/risk-engine/ ./services/risk-engine/
+COPY contracts/ ./contracts/
 
-# (Optional for later) Copying the contracts folder when it will be needed
-# COPY contracts/ ./contracts/
-
-WORKDIR /app/services/risk-engine
+# Setting PYTHONPATH so Python can resolve modules from both /app and /app/services/risk-engine
+ENV PYTHONPATH="/app:/app/services/risk-engine"
 
 EXPOSE 8004
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8004"]
+CMD ["uvicorn", "main:app", "--app-dir", "services/risk-engine", "--host", "0.0.0.0", "--port", "8004"]
