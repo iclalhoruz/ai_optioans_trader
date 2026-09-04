@@ -39,6 +39,11 @@ class ChaosTestResult(BaseModel):
     stress_score: float
     logs: List[str] = Field(default_factory=list)
     refined_proposal: TradeProposal
+    # Delta-eşdeğeri hisse sayısı (örn. +85.0 = 85 hisse long gibi davranıyor
+    # demek) - chaos-sandbox spread'i stres testinden geçirirken hesaplar,
+    # risk-engine portföy-delta hard-veto'sunda okur. Opsiyonel: bu alan
+    # eklenene kadar (ve tek-bacak/dead-code yollarda) None kalır.
+    net_delta: Optional[float] = None
 
 # Risk motoru kararı
 class RiskResult(BaseModel):
