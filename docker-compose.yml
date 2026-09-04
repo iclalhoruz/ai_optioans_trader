@@ -69,8 +69,18 @@ services:
     container_name: ai-strategy
     ports:
       - "8002:8002"
+    depends_on:
+      - broker-gateway
     env_file:
       - .env
+    environment:
+      # Same reason as scheduler's override below: .env's localhost default
+      # is for running services directly on the host, but inside this
+      # network broker-gateway is reachable by its service name, not
+      # localhost - without this, ai-strategy's portfolio_value fetch (used
+      # for real position sizing) silently fails and falls back to sizing
+      # as if it knew nothing about the account.
+      BROKER_GATEWAY_URL: http://broker-gateway:8001
     networks:
       - trader-network
 
@@ -93,7 +103,15 @@ services:
     container_name: risk-engine
     ports:
       - "8004:8004"
+    depends_on:
+      - broker-gateway
     env_file:
       - .env
+    environment:
+      # Same fix as ai-strategy above - without this, risk-engine's own
+      # get_portfolio_value() can't reach broker-gateway either, and the
+      # allocation hard-veto silently checks against a hardcoded $100k
+      # instead of the real account value.
+      BROKER_GATEWAY_URL: http://broker-gateway:8001
     networks:
       - trader-network
