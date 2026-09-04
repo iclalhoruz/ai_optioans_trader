@@ -126,8 +126,8 @@ npm run dev    # http://localhost:5173
 ## Known limitations — stated honestly, not glossed over
 
 This system is safe to run against a paper account and demonstrates the
-full pipeline end-to-end, but two real gaps are still open (both reported,
-neither hidden — see `CLAUDE.md` for full technical detail and live
+full pipeline end-to-end, but real gaps are still open (all reported,
+none hidden — see `CLAUDE.md` for full technical detail and live
 reproductions of each):
 
 - **`chaos-sandbox`'s `direction` field isn't cross-validated** against the
@@ -135,11 +135,21 @@ reproductions of each):
   tested in the wrong (favorable, not adverse) direction. Not an active
   risk today (`ai-strategy` always sets it correctly), but a real gap in
   the service meant to be the trustworthy, independent check.
-- **`risk-engine`'s portfolio-delta hard-veto has no real data to check
-  yet** — the allocation hard-veto had the same class of bug (checking a
-  key that never existed in the real payload) and has been fixed and
-  live-verified; the delta check needs a new field to be computed
-  upstream in `chaos-sandbox` first, which hasn't landed yet.
+- **`risk-engine`'s allocation and portfolio-delta hard-vetoes only
+  evaluate the new trade in isolation, not cumulative exposure across
+  already-open positions.** Both checks compare the proposed trade against
+  a fixed cap on its own (`current_portfolio_delta_pct` is hardcoded to
+  `0.0`) rather than adding it to what's already open. Each individual
+  trade is small and bounded (`TARGET_ALLOCATION_PCT` targets 3% of
+  portfolio, capped well under the 5%/50% hard limits), and open positions
+  get closed on a regular cycle, so this isn't believed to be a live risk
+  today — but it means many simultaneously-open small positions could in
+  principle add up past what either cap was meant to prevent. A real fix
+  needs `broker-gateway` to expose real-time aggregate delta/allocation
+  across open positions (Alpaca already returns live per-position Greeks,
+  no extra pricing model needed) for `risk-engine` to check against -
+  deliberately deprioritized given the deadline rather than built
+  unverified.
 - **Whether the trading strategy itself has a real, positive expectancy is
   honestly unproven, not disproven.** Per-trade risk management (bounded-
   loss spreads, correct position grouping/exit ordering, portfolio-scaled
