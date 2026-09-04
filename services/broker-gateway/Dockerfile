@@ -24,5 +24,7 @@ COPY services/broker-gateway/ ./services/broker-gateway/
 
 ENV PYTHONPATH=/app
 EXPOSE 8001
+HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=5 \
+    CMD ["python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8001/health', timeout=2).close()"]
 
 CMD ["uvicorn", "main:app", "--app-dir", "services/broker-gateway", "--host", "0.0.0.0", "--port", "8001"]

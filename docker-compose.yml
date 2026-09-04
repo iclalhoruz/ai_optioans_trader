@@ -1,9 +1,5 @@
-# Target topology for Aegis-OptionAI. Redis is real and will come up today;
-# the 4 service blocks below point at Dockerfiles that don't exist yet
-# (services/*/ are still empty) so `docker compose up` won't
-# fully work until each one lands. Wiring it now means whoever writes the
-# first service just drops in a Dockerfile + main.py and this file already
-# knows where it lives.
+# Full topology for Aegis-OptionAI - `docker compose up -d --build` brings
+# up Redis, all 4 services, and the autonomous scheduler.
 
 networks:
   trader-network:
@@ -35,10 +31,32 @@ services:
     container_name: broker-gateway
     ports:
       - "8001:8001"
+    depends_on:
+      redis:
+        condition: service_healthy
     env_file:
       - .env
+    environment:
+      # .env's localhost defaults are for running on the host directly;
+      # inside this network every other service is reachable by its
+      # service name instead. Found live via a real `docker compose up`
+      # run, one bug at a time: broker-gateway's own PipelineOrchestrator
+      # couldn't reach Redis (every /runs call 503'd with "Connection
+      # refused"), then, once that was fixed, couldn't reach ai-strategy
+      # either (trade_proposal step failed) - same root cause, every
+      # localhost default needs the same override here.
+      REDIS_URL: redis://redis:6379/0
+      AI_STRATEGY_URL: http://ai-strategy:8002
+      CHAOS_SANDBOX_URL: http://chaos-sandbox:8003
+      RISK_ENGINE_URL: http://risk-engine:8004
     networks:
       - trader-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8001/health', timeout=2).close()"]
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+      retries: 5
 
   # The autonomous piece - loops over WATCHLIST_TICKERS and triggers a run
   # every SCHEDULER_INTERVAL_MINUTES via broker-gateway's POST /runs.
@@ -51,7 +69,8 @@ services:
       dockerfile: workflow/Dockerfile
     container_name: aegis-scheduler
     depends_on:
-      - broker-gateway
+      broker-gateway:
+        condition: service_healthy
     env_file:
       - .env
     environment:
@@ -70,7 +89,8 @@ services:
     ports:
       - "8002:8002"
     depends_on:
-      - broker-gateway
+      broker-gateway:
+        condition: service_healthy
     env_file:
       - .env
     environment:
@@ -104,7 +124,8 @@ services:
     ports:
       - "8004:8004"
     depends_on:
-      - broker-gateway
+      broker-gateway:
+        condition: service_healthy
     env_file:
       - .env
     environment:
