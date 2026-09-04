@@ -16,7 +16,7 @@ from chaos_sandbox.models import (
     option_underlying,
     parse_stress_inputs,
 )
-from chaos_sandbox.pricing import black_scholes_price
+from chaos_sandbox.pricing import black_scholes_delta, black_scholes_price
 from chaos_sandbox.settings import Settings
 
 
@@ -134,6 +134,27 @@ def calculate_spread_scenarios(
     return tuple(results)
 
 
+def calculate_spread_net_delta(inputs: SpreadStressInputs) -> float:
+    """Return the spread's current exposure in underlying-share equivalents."""
+    per_contract_delta = sum(
+        (1 if leg.side == "buy" else -1)
+        * leg.ratio_qty
+        * black_scholes_delta(
+            spot=inputs.spot_price,
+            strike=leg.strike,
+            time_to_expiry=leg.days_to_expiry / 365,
+            volatility=leg.implied_volatility,
+            risk_free_rate=inputs.risk_free_rate,
+            option_type=leg.option_type,
+        )
+        for leg in inputs.legs
+    )
+    net_delta = per_contract_delta * inputs.quantity * inputs.contract_multiplier
+    if not math.isfinite(net_delta):
+        raise ValueError("spread net delta must be finite")
+    return net_delta
+
+
 def _scenario_log(result: ScenarioResult, inputs: OptionStressInputs) -> str:
     if result.name == "SPREAD_SHOCK":
         change = f"spread widened from {inputs.ask - inputs.bid:.4f} to {result.spread:.4f}"
@@ -196,13 +217,16 @@ class ChaosSandbox(BaseChaosSandbox):
                 refined_proposal=proposal,
             )
         inputs = parse_stress_inputs(proposal.order_details)
+        net_delta: float | None = None
         if isinstance(inputs, SpreadStressInputs):
+            net_delta = calculate_spread_net_delta(inputs)
             if any(option_underlying(leg.option_symbol) != proposal.symbol.upper() for leg in inputs.legs):
                 return ChaosTestResult(
                     is_safe=False,
                     stress_score=1.0,
                     logs=["VETO: every spread leg must use the proposal's underlying symbol"],
                     refined_proposal=proposal,
+                    net_delta=net_delta,
                 )
             if inputs.limit_price < 0:
                 return ChaosTestResult(
@@ -210,6 +234,7 @@ class ChaosSandbox(BaseChaosSandbox):
                     stress_score=1.0,
                     logs=["VETO: net-credit spreads require a maximum-loss or margin model and are not supported"],
                     refined_proposal=proposal,
+                    net_delta=net_delta,
                 )
             if any(leg.position_intent.endswith("_to_close") for leg in inputs.legs):
                 return ChaosTestResult(
@@ -217,6 +242,7 @@ class ChaosSandbox(BaseChaosSandbox):
                     stress_score=1.0,
                     logs=["VETO: closing and rolling spread legs require current-position cost basis and are not supported"],
                     refined_proposal=proposal,
+                    net_delta=net_delta,
                 )
             results = calculate_spread_scenarios(inputs, self.settings)
             logs = [_spread_scenario_log(result, inputs, self.settings) for result in results]
@@ -232,5 +258,9 @@ class ChaosSandbox(BaseChaosSandbox):
             f"the configured {self.settings.max_stress_loss_pct:.1%} limit"
         )
         return ChaosTestResult(
-            is_safe=is_safe, stress_score=stress_score, logs=logs, refined_proposal=proposal,
+            is_safe=is_safe,
+            stress_score=stress_score,
+            logs=logs,
+            refined_proposal=proposal,
+            net_delta=net_delta,
         )

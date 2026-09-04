@@ -8,8 +8,13 @@ from pydantic import ValidationError
 from contracts.schemas import ChaosTestResult, TradeProposal
 from chaos_sandbox.main import create_app
 from chaos_sandbox.models import SpreadStressInputs, parse_stress_inputs
-from chaos_sandbox.pricing import black_scholes_price
-from chaos_sandbox.stress_engine import ChaosSandbox, calculate_spread_scenarios
+from chaos_sandbox.pricing import black_scholes_delta, black_scholes_price
+from chaos_sandbox.settings import Settings
+from chaos_sandbox.stress_engine import (
+    ChaosSandbox,
+    calculate_spread_net_delta,
+    calculate_spread_scenarios,
+)
 
 
 @pytest.fixture
@@ -136,6 +141,9 @@ def test_spread_pnl_score_decision_and_proposal_preservation(spread_proposal, se
     assert result.is_safe is (result.stress_score <= settings.max_stress_loss_pct)
     assert result.refined_proposal.model_dump() == original
     assert spread_proposal.model_dump() == original
+    assert result.net_delta == pytest.approx(calculate_spread_net_delta(
+        SpreadStressInputs.model_validate(spread_proposal.order_details),
+    ))
     assert [log.split(":", 1)[0] for log in result.logs] == [
         "SPREAD_SHOCK", "IV_CRUSH", "ADVERSE_MOVE", "VETO",
     ]
@@ -143,11 +151,67 @@ def test_spread_pnl_score_decision_and_proposal_preservation(spread_proposal, se
     assert "sell" in result.logs[0]
 
 
+def test_safe_spread_result_includes_net_delta(spread_proposal):
+    result = run(spread_proposal, Settings(max_stress_loss_pct=1.0))
+    assert result.is_safe is True
+    assert result.logs[-1].startswith("SAFE:")
+    assert result.net_delta == pytest.approx(calculate_spread_net_delta(
+        SpreadStressInputs.model_validate(spread_proposal.order_details),
+    ))
+
+
 def test_ratio_quantity_changes_signed_net_contribution(spread_details, settings):
     spread_details["legs"][0]["ratio_qty"] = 2
     result = calculate_spread_scenarios(SpreadStressInputs.model_validate(spread_details), settings)[1]
     long_leg = result.legs[0]
     assert long_leg.signed_contribution == pytest.approx(2 * long_leg.theoretical_price)
+
+
+def test_net_delta_uses_leg_side_ratio_quantity_and_multiplier(spread_details):
+    spread_details["quantity"] = 3
+    spread_details["contract_multiplier"] = 50
+    spread_details["legs"][0]["ratio_qty"] = 2
+    inputs = SpreadStressInputs.model_validate(spread_details)
+    leg_deltas = [black_scholes_delta(
+        spot=inputs.spot_price,
+        strike=leg.strike,
+        time_to_expiry=leg.days_to_expiry / 365,
+        volatility=leg.implied_volatility,
+        risk_free_rate=inputs.risk_free_rate,
+        option_type=leg.option_type,
+    ) for leg in inputs.legs]
+    expected = (2 * leg_deltas[0] - leg_deltas[1]) * 3 * 50
+    assert calculate_spread_net_delta(inputs) == pytest.approx(expected)
+
+
+def test_narrow_call_vertical_has_small_net_delta(spread_details):
+    spread_details["legs"][0].update(implied_volatility=0.25)
+    spread_details["legs"][1].update(
+        symbol="TEST261016C00101000",
+        strike=101.0,
+        implied_volatility=0.25,
+    )
+    net_delta = calculate_spread_net_delta(SpreadStressInputs.model_validate(spread_details))
+    assert 0 < net_delta < 10
+
+
+def test_wide_vertical_with_far_otm_short_leg_tracks_long_leg_delta(spread_details):
+    spread_details["legs"][1].update(
+        symbol="TEST261016C00160000",
+        strike=160.0,
+    )
+    inputs = SpreadStressInputs.model_validate(spread_details)
+    long_leg = inputs.legs[0]
+    long_delta = black_scholes_delta(
+        spot=inputs.spot_price,
+        strike=long_leg.strike,
+        time_to_expiry=long_leg.days_to_expiry / 365,
+        volatility=long_leg.implied_volatility,
+        risk_free_rate=inputs.risk_free_rate,
+        option_type=long_leg.option_type,
+    ) * inputs.quantity * inputs.contract_multiplier
+    net_delta = calculate_spread_net_delta(inputs)
+    assert net_delta == pytest.approx(long_delta, abs=0.01)
 
 
 @pytest.mark.parametrize("leg_count", [1, 5])
@@ -197,6 +261,7 @@ def test_credit_spread_is_valid_but_fail_closed(spread_proposal, settings):
     result = run(spread_proposal, settings)
     assert result.is_safe is False
     assert result.stress_score == 1
+    assert result.net_delta is not None
     assert "net-credit spreads" in result.logs[0]
 
 
@@ -207,6 +272,7 @@ def test_closing_or_rolling_spread_is_valid_but_fail_closed(spread_proposal, set
     result = run(spread_proposal, settings)
     assert result.is_safe is False
     assert result.stress_score == 1
+    assert result.net_delta is not None
     assert "closing and rolling" in result.logs[0]
 
 
@@ -215,6 +281,7 @@ def test_mismatched_underlying_is_fail_closed(spread_proposal, settings):
     result = run(spread_proposal, settings)
     assert result.is_safe is False
     assert result.stress_score == 1
+    assert result.net_delta is not None
     assert "underlying symbol" in result.logs[0]
 
 
@@ -224,6 +291,7 @@ def test_spread_api_response_matches_shared_contract(spread_proposal, settings):
     assert response.status_code == 200
     result = ChaosTestResult.model_validate(response.json())
     assert result.refined_proposal == spread_proposal
+    assert result.net_delta is not None
     assert len(result.logs) == 4
 
 

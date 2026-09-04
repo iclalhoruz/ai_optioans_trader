@@ -24,6 +24,10 @@ bu üç senaryoda kaybın eşiği aşmadığını belirtir; işlem veya kâr gar
   zaman çalıştırılmaz, diğer teklif alanlarıyla birlikte aynen geri verilir.
 - `refined_proposal` miktar, fiyat, metadata ve içerik bakımından değiştirilmez;
   yerel doğrulamanın varsayılanları bile bu alana eklenmez.
+- `net_delta`, spread bacaklarından hesaplanan güncel portföy delta'sını hisse
+  eşdeğeri olarak taşır. Örneğin `85.0`, dayanak varlıktan 85 hisse long
+  taşımaya yakın fiyat duyarlılığı demektir. Tek bacak, HOLD ve üst seviye SELL
+  sonuçlarında bu alan `null` kalır.
 
 `legs` bulunmayan BUY teklifi mevcut tek-bacak modeline, `legs` bulunan teklif
 spread modeline yönlendirilir. Net-credit spread'ler ile closing/rolling
@@ -119,6 +123,22 @@ yapar. Spread şokunda buy leg teorik fiyat eksi yarım stresli spread'den
 satılıyor; sell leg teorik fiyat artı yarım stresli spread maliyetiyle geri
 alınıyor. IV ve adverse-move senaryolarında her bacağın stresli teorik değeri
 işareti ve `ratio_qty` ile netleştirilir.
+
+Spread'in güncel net delta'sı senaryo şoklarından önce, aynı Black–Scholes
+girdileriyle her bacak için ayrı hesaplanır. Buy bacak deltası pozitif, sell
+bacak deltası negatif işaretle ve `ratio_qty` ile toplanır; ardından üst seviye
+`quantity` ve `contract_multiplier` ile çarpılır:
+
+```text
+net_delta = sum(side_sign * ratio_qty * leg_delta)
+            * quantity * contract_multiplier
+```
+
+Bu değer, stres skoru SAFE veya VETO üretse de geçerli spread sonuçlarında
+`ChaosTestResult.net_delta` alanına yazılır. Net-credit, closing/rolling veya
+underlying eşleşmezliği nedeniyle fail-closed VETO edilen, ancak şema açısından
+geçerli spread'lerde de delta hesaplanır. Spread girdisinden hazır delta kabul
+edilmez; her bacak strike, IV ve vadesinden yeniden hesaplanır.
 
 IV ve fiyat şoklarında çıkış fiyatı teorik değerdir; ilave spread kesintisi
 uygulanmaz. Bu tercih her şokun etkisini ayrı ölçer. Spread senaryosunda merkez,
@@ -238,7 +258,10 @@ doğrulamayı `ChaosTestResult.model_validate(response.json())` ile yapar.
   komisyon, kur, jump risk ve portföy korelasyonları modellenmez.
 - Sayılar aynı para biriminde varsayılır; loglarda `$` gösterilir. Pozitif
   tamsayı multiplier ve miktar tek bacaklı long pozisyonu ölçekler.
-- `option_symbol` ve `delta` yalnızca metadata olarak korunur. Sembolün strike,
+- Tek bacaklı eski `OptionStressInputs.delta` alanı yalnızca metadata olarak
+  korunur ve sonuç üretiminde kullanılmaz. Spread girdisinde delta alanı yoktur;
+  `net_delta` servis tarafından fiyatlama girdilerinden hesaplanır. `option_symbol`
+  da metadata olarak korunur. Sembolün strike,
   tür veya tarih alanlarıyla tutarlılığı ve kotasyon güncelliği doğrulanmaz.
   Verilen `days_to_expiry` kullanılır; sistem saati hesaplamaya katılmaz.
 - Net-debit BUY spread içinde `sell_to_open` leg desteklenir. Net-credit,
