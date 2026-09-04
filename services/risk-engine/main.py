@@ -40,8 +40,17 @@ async def validate_risk(chaos_result: ChaosTestResult):
     portfolio_value = await get_portfolio_value()
     proposal: TradeProposal = chaos_result.refined_proposal
     
-    trade_amount = float(proposal.order_details.get("amount", 0.0))
-    trade_delta = float(proposal.order_details.get("trade_delta", 0.0))
+    # order_details never actually has an "amount" key - ai-strategy's real
+    # proposals carry quantity/limit_price/contract_multiplier instead
+    # (same shape workflow/pipeline.py's own _notional_value() reads), so
+    # this was silently always 0.0 and the allocation check never fired.
+    details = proposal.order_details
+    trade_amount = (
+        float(details.get("quantity", 0))
+        * float(details.get("limit_price", 0))
+        * float(details.get("contract_multiplier", 100))
+    )
+    trade_delta = float(details.get("trade_delta", 0.0))
     current_portfolio_delta = 0.0 
     
     rules_to_check = [
